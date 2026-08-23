@@ -1,0 +1,20 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTubeMP3Downloader-windows-x64
+          path: build/Release/YouTubeMP3Downloader.exe
