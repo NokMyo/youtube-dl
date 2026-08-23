@@ -657,7 +657,11 @@ static BOOL SameUrlOrId(const Job *a, const Job *b) {
 
 static void CompactDuplicates(void) {
     EnterCriticalSection(&g_jobs_lock);
-    Job temp[MAX_JOBS];
+    Job *temp = (Job *)calloc(MAX_JOBS, sizeof(Job));
+    if (!temp) {
+        LeaveCriticalSection(&g_jobs_lock);
+        return;
+    }
     int out = 0;
     for (int i = 0; i < g_job_count; ++i) {
         BOOL dup = FALSE;
@@ -671,6 +675,7 @@ static void CompactDuplicates(void) {
     }
     memcpy(g_jobs, temp, sizeof(Job) * out);
     g_job_count = out;
+    free(temp);
     LeaveCriticalSection(&g_jobs_lock);
 }
 
