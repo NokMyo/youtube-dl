@@ -23,16 +23,49 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
-
           $deps = & $dumpbin.FullName /DEPENDENTS build/Release/YouTubeMP3Downloader.exe | Out-String
-          $deps | Write-Host
-
           if ($deps -match 'VCRUNTIME140(?:_1)?\.dll' -or $deps -match 'MSVCP140(?:_\d+)?\.dll') {
             throw 'Release EXE still depends on the Visual C++ runtime DLLs.'
           }
 
-      - name: Upload EXE
+      - name: Download bundled tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force payload | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'payload/yt-dlp.exe'
+          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'ffmpeg.zip'
+          Expand-Archive -LiteralPath 'ffmpeg.zip' -DestinationPath 'ffmpeg-dist' -Force
+          $ffmpeg = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          $ffprobe = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffprobe.exe' | Select-Object -First 1
+          if (-not $ffmpeg -or -not $ffprobe) { throw 'FFmpeg binaries were not found.' }
+          Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
+          Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
+
+      - name: Build single-file EXE
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'payload/*' -DestinationPath 'tools-payload.zip' -CompressionLevel Optimal -Force
+          Copy-Item 'build/Release/YouTubeMP3Downloader.exe' 'YouTubeMP3Downloader.exe'
+          $payload = [System.IO.File]::ReadAllBytes((Resolve-Path 'tools-payload.zip'))
+          $out = [System.IO.File]::Open('YouTubeMP3Downloader.exe', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
+          try {
+            $out.Write($payload, 0, $payload.Length)
+            $size = [BitConverter]::GetBytes([Int64]$payload.Length)
+            $out.Write($size, 0, $size.Length)
+            $magic = [Text.Encoding]::ASCII.GetBytes('YTMP3PK1')
+            $out.Write($magic, 0, $magic.Length)
+          } finally {
+            $out.Dispose()
+          }
+
+      - name: Verify bundled tools
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath '.\YouTubeMP3Downloader.exe' -ArgumentList '--self-test-tools' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Bundled tool self-test failed with exit code $($p.ExitCode)." }
+
+      - name: Upload single-file EXE
         uses: actions/upload-artifact@v4
         with:
           name: YouTubeMP3Downloader-windows-x64
-          path: build/Release/YouTubeMP3Downloader.exe
+          path: YouTubeMP3Downloader.exe
