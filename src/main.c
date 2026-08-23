@@ -138,6 +138,7 @@ static wchar_t g_app_dir[MAX_PATH];
 static wchar_t g_ytdlp[MAX_PATH];
 static wchar_t g_ffmpeg[MAX_PATH];
 static wchar_t g_ffmpeg_dir[MAX_PATH];
+static wchar_t g_tools_dir[MAX_PATH];
 
 static BOOL FileExistsW2(const wchar_t *path) {
     DWORD a = GetFileAttributesW(path);
@@ -161,6 +162,13 @@ static void GetAppDirectory(wchar_t *out, size_t cch) {
 
 static BOOL FindTool(const wchar_t *name, wchar_t *out, size_t cch) {
     wchar_t local[MAX_PATH];
+    if (g_tools_dir[0]) {
+        StringCchPrintfW(local, MAX_PATH, L"%s\\%s", g_tools_dir, name);
+        if (FileExistsW2(local)) {
+            StringCchCopyW(out, cch, local);
+            return TRUE;
+        }
+    }
     StringCchPrintfW(local, MAX_PATH, L"%s\\%s", g_app_dir, name);
     if (FileExistsW2(local)) {
         StringCchCopyW(out, cch, local);
@@ -174,6 +182,177 @@ static void DirectoryFromPath(const wchar_t *path, wchar_t *out, size_t cch) {
     StringCchCopyW(out, cch, path);
     wchar_t *slash = wcsrchr(out, L'\\');
     if (slash) *slash = L'\0';
+}
+
+static BOOL RunHiddenProcess(const wchar_t *command) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    wchar_t *cmd = _wcsdup(command);
+    if (!cmd) return FALSE;
+    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    free(cmd);
+    if (!ok) return FALSE;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+static BOOL BundledToolFilesExist(void) {
+    if (!g_tools_dir[0]) return FALSE;
+    wchar_t p1[MAX_PATH], p2[MAX_PATH], p3[MAX_PATH];
+    StringCchPrintfW(p1, MAX_PATH, L"%s\\yt-dlp.exe", g_tools_dir);
+    StringCchPrintfW(p2, MAX_PATH, L"%s\\ffmpeg.exe", g_tools_dir);
+    StringCchPrintfW(p3, MAX_PATH, L"%s\\ffprobe.exe", g_tools_dir);
+    return FileExistsW2(p1) && FileExistsW2(p2) && FileExistsW2(p3);
+}
+
+static BOOL ReadBundleStamp(ULONGLONG expected) {
+    wchar_t path[MAX_PATH];
+    StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    wchar_t text[64];
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, text, sizeof(text) - sizeof(wchar_t), &got, NULL);
+    CloseHandle(h);
+    if (!ok) return FALSE;
+    text[got / sizeof(wchar_t)] = 0;
+    return _wcstoui64(text, NULL, 10) == expected;
+}
+
+static void WriteBundleStamp(ULONGLONG value) {
+    wchar_t path[MAX_PATH], text[64];
+    StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
+    StringCchPrintfW(text, 64, L"%llu", value);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(h, text, (DWORD)(wcslen(text) * sizeof(wchar_t)), &wrote, NULL);
+    CloseHandle(h);
+}
+
+static BOOL PrepareBundledTools(void) {
+    g_tools_dir[0] = 0;
+
+    wchar_t local[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
+        return FALSE;
+    }
+    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\YouTubeMP3Downloader\\tools", local);
+    SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
+
+    wchar_t exe[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
+    HANDLE in = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (in == INVALID_HANDLE_VALUE) return FALSE;
+
+    LARGE_INTEGER total;
+    if (!GetFileSizeEx(in, &total) || total.QuadPart < 16) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
+    LARGE_INTEGER footer_pos;
+    footer_pos.QuadPart = -16;
+    if (!SetFilePointerEx(in, footer_pos, NULL, FILE_END)) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
+    unsigned char footer[16];
+    DWORD got = 0;
+    if (!ReadFile(in, footer, sizeof(footer), &got, NULL) || got != sizeof(footer) ||
+        memcmp(footer + 8, "YTMP3PK1", 8) != 0) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
+    ULONGLONG payload_size = 0;
+    memcpy(&payload_size, footer, sizeof(payload_size));
+    if (!payload_size || payload_size > (ULONGLONG)total.QuadPart - 16ULL) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
+    if (BundledToolFilesExist() && ReadBundleStamp((ULONGLONG)total.QuadPart)) {
+        CloseHandle(in);
+        return TRUE;
+    }
+
+    wchar_t temp_dir[MAX_PATH], zip_path[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, temp_dir)) {
+        CloseHandle(in);
+        return FALSE;
+    }
+    StringCchPrintfW(zip_path, MAX_PATH, L"%sYTMP3_tools_%lu.zip", temp_dir, GetCurrentProcessId());
+    HANDLE out = CreateFileW(zip_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (out == INVALID_HANDLE_VALUE) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
+    LARGE_INTEGER start;
+    start.QuadPart = total.QuadPart - 16 - (LONGLONG)payload_size;
+    if (!SetFilePointerEx(in, start, NULL, FILE_BEGIN)) {
+        CloseHandle(out);
+        CloseHandle(in);
+        DeleteFileW(zip_path);
+        return FALSE;
+    }
+
+    unsigned char *buffer = (unsigned char *)malloc(64 * 1024);
+    if (!buffer) {
+        CloseHandle(out);
+        CloseHandle(in);
+        DeleteFileW(zip_path);
+        return FALSE;
+    }
+
+    ULONGLONG remaining = payload_size;
+    BOOL copy_ok = TRUE;
+    while (remaining) {
+        DWORD want = remaining > 64 * 1024 ? 64 * 1024 : (DWORD)remaining;
+        DWORD read_bytes = 0, wrote = 0;
+        if (!ReadFile(in, buffer, want, &read_bytes, NULL) || read_bytes != want ||
+            !WriteFile(out, buffer, read_bytes, &wrote, NULL) || wrote != read_bytes) {
+            copy_ok = FALSE;
+            break;
+        }
+        remaining -= read_bytes;
+    }
+    free(buffer);
+    CloseHandle(out);
+    CloseHandle(in);
+    if (!copy_ok) {
+        DeleteFileW(zip_path);
+        return FALSE;
+    }
+
+    wchar_t command[4096];
+    StringCchPrintfW(command, 4096, L"tar.exe -xf \"%s\" -C \"%s\"", zip_path, g_tools_dir);
+    BOOL extracted = RunHiddenProcess(command);
+    if (!extracted) {
+        StringCchPrintfW(command, 4096,
+            L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\"",
+            zip_path, g_tools_dir);
+        extracted = RunHiddenProcess(command);
+    }
+    DeleteFileW(zip_path);
+
+    if (extracted && BundledToolFilesExist()) {
+        WriteBundleStamp((ULONGLONG)total.QuadPart);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static void RefreshTools(void) {
@@ -1155,11 +1334,11 @@ static void SetDefaultFolder(void) {
     wchar_t music[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYMUSIC | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, music))) {
         wchar_t folder[MAX_PATH];
-        StringCchPrintfW(folder, MAX_PATH, L"%s\\GearIconX", music);
+        StringCchPrintfW(folder, MAX_PATH, L"%s\\YouTubeMP3", music);
         SHCreateDirectoryExW(g_main, folder, NULL);
         SetWindowTextW(g_folder_edit, folder);
     } else {
-        SetWindowTextW(g_folder_edit, L"C:\\Music\\GearIconX");
+        SetWindowTextW(g_folder_edit, L"C:\\Music\\YouTubeMP3");
     }
     UpdateFolderStatsUI();
 }
@@ -1377,6 +1556,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitializeCriticalSection(&g_jobs_lock);
     GetAppDirectory(g_app_dir, MAX_PATH);
+    PrepareBundledTools();
+    RefreshTools();
+    if (lpCmdLine && wcsstr(lpCmdLine, L"--self-test-tools")) {
+        wchar_t ffprobe[MAX_PATH];
+        BOOL ok = g_ytdlp[0] && g_ffmpeg[0] && FindTool(L"ffprobe.exe", ffprobe, MAX_PATH);
+        DeleteCriticalSection(&g_jobs_lock);
+        CoUninitialize();
+        return ok ? 0 : 2;
+    }
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
