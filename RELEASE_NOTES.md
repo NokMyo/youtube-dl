@@ -1,6 +1,13 @@
-# YouTube MP3 Downloader v1.0
+# YouTube MP3 Downloader v1.0.1
 
-첫 정식 릴리즈입니다.
+v1.0 첫 배포판의 Windows 런타임 의존성 문제를 수정한 핫픽스 릴리즈입니다.
+
+## v1.0.1 수정 사항
+
+- `VCRUNTIME140.dll`이 없는 PC에서 실행되지 않던 문제 수정
+- MSVC 런타임을 정적 링크(`/MT`)하도록 변경
+- 별도의 Visual C++ Redistributable 설치 없이 실행 가능하도록 배포 방식 개선
+- GitHub Actions에서 릴리즈 EXE의 `VCRUNTIME140.dll` 의존성 여부를 자동 검사
 
 ## 주요 기능
 
