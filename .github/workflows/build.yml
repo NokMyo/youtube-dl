@@ -9,10 +9,28 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Configure
         run: cmake -S . -B build -A x64
+
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Verify portable MSVC runtime
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
+
+          $deps = & $dumpbin.FullName /DEPENDENTS build/Release/YouTubeMP3Downloader.exe | Out-String
+          $deps | Write-Host
+
+          if ($deps -match 'VCRUNTIME140(?:_1)?\.dll' -or $deps -match 'MSVCP140(?:_\d+)?\.dll') {
+            throw 'Release EXE still depends on the Visual C++ runtime DLLs.'
+          }
+
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
