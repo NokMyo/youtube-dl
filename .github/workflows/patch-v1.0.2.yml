@@ -1,0 +1,293 @@
+name: Patch v1.0.2 runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/patch-v1.0.2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Apply source fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('src/main.c')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+              'static wchar_t g_ffmpeg_dir[MAX_PATH];\n',
+              'static wchar_t g_ffmpeg_dir[MAX_PATH];\nstatic wchar_t g_tools_dir[MAX_PATH];\n',
+              1,
+          )
+
+          old_find = '''static BOOL FindTool(const wchar_t *name, wchar_t *out, size_t cch) {
+              wchar_t local[MAX_PATH];
+              StringCchPrintfW(local, MAX_PATH, L"%s\\\\%s", g_app_dir, name);
+              if (FileExistsW2(local)) {
+                  StringCchCopyW(out, cch, local);
+                  return TRUE;
+              }
+              DWORD n = SearchPathW(NULL, name, NULL, (DWORD)cch, out, NULL);
+              return n > 0 && n < cch;
+          }
+          '''
+          new_find = '''static BOOL FindTool(const wchar_t *name, wchar_t *out, size_t cch) {
+              wchar_t local[MAX_PATH];
+              if (g_tools_dir[0]) {
+                  StringCchPrintfW(local, MAX_PATH, L"%s\\\\%s", g_tools_dir, name);
+                  if (FileExistsW2(local)) {
+                      StringCchCopyW(out, cch, local);
+                      return TRUE;
+                  }
+              }
+              StringCchPrintfW(local, MAX_PATH, L"%s\\\\%s", g_app_dir, name);
+              if (FileExistsW2(local)) {
+                  StringCchCopyW(out, cch, local);
+                  return TRUE;
+              }
+              DWORD n = SearchPathW(NULL, name, NULL, (DWORD)cch, out, NULL);
+              return n > 0 && n < cch;
+          }
+          '''
+          if old_find not in s:
+              raise SystemExit('FindTool pattern not found')
+          s = s.replace(old_find, new_find, 1)
+
+          marker = '''static void RefreshTools(void) {
+          '''
+          helpers = r'''static BOOL RunHiddenProcess(const wchar_t *command) {
+              STARTUPINFOW si;
+              PROCESS_INFORMATION pi;
+              ZeroMemory(&si, sizeof(si));
+              ZeroMemory(&pi, sizeof(pi));
+              si.cb = sizeof(si);
+              si.dwFlags = STARTF_USESHOWWINDOW;
+              si.wShowWindow = SW_HIDE;
+
+              wchar_t *cmd = _wcsdup(command);
+              if (!cmd) return FALSE;
+              BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+              free(cmd);
+              if (!ok) return FALSE;
+              WaitForSingleObject(pi.hProcess, INFINITE);
+              DWORD code = 1;
+              GetExitCodeProcess(pi.hProcess, &code);
+              CloseHandle(pi.hThread);
+              CloseHandle(pi.hProcess);
+              return code == 0;
+          }
+
+          static BOOL BundledToolFilesExist(void) {
+              if (!g_tools_dir[0]) return FALSE;
+              wchar_t p1[MAX_PATH], p2[MAX_PATH], p3[MAX_PATH];
+              StringCchPrintfW(p1, MAX_PATH, L"%s\\yt-dlp.exe", g_tools_dir);
+              StringCchPrintfW(p2, MAX_PATH, L"%s\\ffmpeg.exe", g_tools_dir);
+              StringCchPrintfW(p3, MAX_PATH, L"%s\\ffprobe.exe", g_tools_dir);
+              return FileExistsW2(p1) && FileExistsW2(p2) && FileExistsW2(p3);
+          }
+
+          static BOOL ReadBundleStamp(ULONGLONG expected) {
+              wchar_t path[MAX_PATH];
+              StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
+              HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+              if (h == INVALID_HANDLE_VALUE) return FALSE;
+              wchar_t text[64];
+              DWORD got = 0;
+              BOOL ok = ReadFile(h, text, sizeof(text) - sizeof(wchar_t), &got, NULL);
+              CloseHandle(h);
+              if (!ok) return FALSE;
+              text[got / sizeof(wchar_t)] = 0;
+              return _wcstoui64(text, NULL, 10) == expected;
+          }
+
+          static void WriteBundleStamp(ULONGLONG value) {
+              wchar_t path[MAX_PATH], text[64];
+              StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
+              StringCchPrintfW(text, 64, L"%llu", value);
+              HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
+              if (h == INVALID_HANDLE_VALUE) return;
+              DWORD wrote = 0;
+              WriteFile(h, text, (DWORD)(wcslen(text) * sizeof(wchar_t)), &wrote, NULL);
+              CloseHandle(h);
+          }
+
+          static BOOL PrepareBundledTools(void) {
+              g_tools_dir[0] = 0;
+
+              wchar_t local[MAX_PATH];
+              if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
+                  return FALSE;
+              }
+              StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\YouTubeMP3Downloader\\tools", local);
+              SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
+
+              wchar_t exe[MAX_PATH];
+              if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
+              HANDLE in = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+              if (in == INVALID_HANDLE_VALUE) return FALSE;
+
+              LARGE_INTEGER total;
+              if (!GetFileSizeEx(in, &total) || total.QuadPart < 16) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+
+              LARGE_INTEGER footer_pos;
+              footer_pos.QuadPart = -16;
+              if (!SetFilePointerEx(in, footer_pos, NULL, FILE_END)) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+
+              unsigned char footer[16];
+              DWORD got = 0;
+              if (!ReadFile(in, footer, sizeof(footer), &got, NULL) || got != sizeof(footer) ||
+                  memcmp(footer + 8, "YTMP3PK1", 8) != 0) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+
+              ULONGLONG payload_size = 0;
+              memcpy(&payload_size, footer, sizeof(payload_size));
+              if (!payload_size || payload_size > (ULONGLONG)total.QuadPart - 16ULL) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+
+              if (BundledToolFilesExist() && ReadBundleStamp((ULONGLONG)total.QuadPart)) {
+                  CloseHandle(in);
+                  return TRUE;
+              }
+
+              wchar_t temp_dir[MAX_PATH], zip_path[MAX_PATH];
+              if (!GetTempPathW(MAX_PATH, temp_dir)) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+              StringCchPrintfW(zip_path, MAX_PATH, L"%sYTMP3_tools_%lu.zip", temp_dir, GetCurrentProcessId());
+              HANDLE out = CreateFileW(zip_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+              if (out == INVALID_HANDLE_VALUE) {
+                  CloseHandle(in);
+                  return FALSE;
+              }
+
+              LARGE_INTEGER start;
+              start.QuadPart = total.QuadPart - 16 - (LONGLONG)payload_size;
+              if (!SetFilePointerEx(in, start, NULL, FILE_BEGIN)) {
+                  CloseHandle(out);
+                  CloseHandle(in);
+                  DeleteFileW(zip_path);
+                  return FALSE;
+              }
+
+              unsigned char *buffer = (unsigned char *)malloc(64 * 1024);
+              if (!buffer) {
+                  CloseHandle(out);
+                  CloseHandle(in);
+                  DeleteFileW(zip_path);
+                  return FALSE;
+              }
+
+              ULONGLONG remaining = payload_size;
+              BOOL copy_ok = TRUE;
+              while (remaining) {
+                  DWORD want = remaining > 64 * 1024 ? 64 * 1024 : (DWORD)remaining;
+                  DWORD read_bytes = 0, wrote = 0;
+                  if (!ReadFile(in, buffer, want, &read_bytes, NULL) || read_bytes != want ||
+                      !WriteFile(out, buffer, read_bytes, &wrote, NULL) || wrote != read_bytes) {
+                      copy_ok = FALSE;
+                      break;
+                  }
+                  remaining -= read_bytes;
+              }
+              free(buffer);
+              CloseHandle(out);
+              CloseHandle(in);
+              if (!copy_ok) {
+                  DeleteFileW(zip_path);
+                  return FALSE;
+              }
+
+              wchar_t command[4096];
+              StringCchPrintfW(command, 4096, L"tar.exe -xf \"%s\" -C \"%s\"", zip_path, g_tools_dir);
+              BOOL extracted = RunHiddenProcess(command);
+              if (!extracted) {
+                  StringCchPrintfW(command, 4096,
+                      L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\"",
+                      zip_path, g_tools_dir);
+                  extracted = RunHiddenProcess(command);
+              }
+              DeleteFileW(zip_path);
+
+              if (extracted && BundledToolFilesExist()) {
+                  WriteBundleStamp((ULONGLONG)total.QuadPart);
+                  return TRUE;
+              }
+              return FALSE;
+          }
+
+          '''
+          if marker not in s:
+              raise SystemExit('RefreshTools marker not found')
+          s = s.replace(marker, helpers + marker, 1)
+
+          s = s.replace('L"%s\\\\GearIconX", music', 'L"%s\\\\YouTubeMP3", music', 1)
+          s = s.replace('L"C:\\\\Music\\\\GearIconX"', 'L"C:\\\\Music\\\\YouTubeMP3"', 1)
+
+          old_main = '''    InitializeCriticalSection(&g_jobs_lock);
+              GetAppDirectory(g_app_dir, MAX_PATH);
+
+              INITCOMMONCONTROLSEX icc;'''
+          new_main = '''    InitializeCriticalSection(&g_jobs_lock);
+              GetAppDirectory(g_app_dir, MAX_PATH);
+              PrepareBundledTools();
+              RefreshTools();
+              if (lpCmdLine && wcsstr(lpCmdLine, L"--self-test-tools")) {
+                  wchar_t ffprobe[MAX_PATH];
+                  BOOL ok = g_ytdlp[0] && g_ffmpeg[0] && FindTool(L"ffprobe.exe", ffprobe, MAX_PATH);
+                  DeleteCriticalSection(&g_jobs_lock);
+                  CoUninitialize();
+                  return ok ? 0 : 2;
+              }
+
+              INITCOMMONCONTROLSEX icc;'''
+          if old_main not in s:
+              raise SystemExit('wWinMain setup pattern not found')
+          s = s.replace(old_main, new_main, 1)
+
+          p.write_text(s, encoding='utf-8')
+
+          Path('RELEASE_NOTES.md').write_text(
+              '# v1.0.2\n\n'
+              '- 링크 추가 후 정보 조회가 끝날 때 프로그램이 종료되던 문제 수정\n'
+              '- 중복 제거 버튼 사용 시 프로그램이 종료되던 문제 수정\n'
+              '- 기본 저장 폴더를 `Music\\\\YouTubeMP3`로 변경\n'
+              '- `yt-dlp`, `ffmpeg`, `ffprobe`를 EXE에 포함해 별도 설치 없이 실행 가능\n',
+              encoding='utf-8'
+          )
+
+      - name: Remove temporary patch workflows
+        shell: pwsh
+        run: |
+          Remove-Item '.github/workflows/patch-v1.0.2.yml' -Force
+          if (Test-Path '.github/workflows/patch-metadata-stack-main.yml') { Remove-Item '.github/workflows/patch-metadata-stack-main.yml' -Force }
+
+      - name: Commit fixes
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.c RELEASE_NOTES.md .github/workflows
+          git commit -m "Fix v1.0.2 crashes and add bundled tools"
+          git push origin HEAD:main
