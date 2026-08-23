@@ -1,6 +1,10 @@
 name: Release v1.0.2
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-v1.yml'
   workflow_dispatch:
 
 permissions:
