@@ -1,8 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
+cmake_policy(SET CMP0091 NEW)
 project(YouTubeMP3Downloader LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Ship a self-contained MSVC runtime so the EXE does not require
+# VCRUNTIME140.dll / the Visual C++ Redistributable on the target PC.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(YouTubeMP3Downloader WIN32
     src/main.c
