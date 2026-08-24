@@ -5,5 +5,5 @@ if errorlevel 1 exit /b 1
 cmake --build build --config Release
 if errorlevel 1 exit /b 1
 echo.
-echo Build complete: build\Release\YouTubeMP3Downloader.exe
+echo Build complete: build\Release\SeowolYTMP3Downloader.exe
 endlocal
