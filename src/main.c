@@ -24,7 +24,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uxtheme.lib")
 
-#define APP_TITLE L"YouTube MP3 Downloader (C)"
+#define APP_TITLE L"Seowol YT MP3 Downloader"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
 #define APP_CLIENT_W 1220
@@ -247,7 +247,7 @@ static BOOL PrepareBundledTools(void) {
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
         return FALSE;
     }
-    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\YouTubeMP3Downloader\\tools", local);
+    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\SeowolYTMP3Downloader\\tools", local);
     SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
 
     wchar_t exe[MAX_PATH];
@@ -1579,7 +1579,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"YTMP3ClassicWin32";
+    wc.lpszClassName = L"SeowolYTMP3ClassicWin32";
     wc.hIconSm = LoadIconW(NULL, IDI_APPLICATION);
     if (!RegisterClassExW(&wc)) return 1;
 
@@ -1607,3 +1607,4 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     CoUninitialize();
     return (int)msg.wParam;
 }
+
