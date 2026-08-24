@@ -60,6 +60,14 @@ build\Release\SeowolYTMP3Downloader.exe
 
 외부 GUI 라이브러리는 사용하지 않고 Windows 기본 Win32 API와 Common Controls를 사용합니다.
 
+빌드된 실행 파일의 파일명·명령행 처리 자체 검사는 아래처럼 실행할 수 있습니다.
+
+```bat
+build\Release\SeowolYTMP3Downloader.exe --self-test-core
+```
+
+프로그램은 실행 결과가 사용자의 전역 `yt-dlp` 설정에 따라 달라지지 않도록 외부 설정 파일을 읽지 않습니다.
+
 ## 이름 자동 정리
 
 가능하면 `yt-dlp`가 제공하는 `artist` / `track` 정보를 우선 사용합니다. 정보가 없으면 제목을 규칙 기반으로 정리합니다.

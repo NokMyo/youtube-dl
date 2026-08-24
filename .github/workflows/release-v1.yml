@@ -14,15 +14,31 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate version
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw 'Version must look like 1.2.3 or 1.2.3-preview.1.'
+          }
 
       - name: Configure
         run: cmake -S . -B build -A x64
 
       - name: Build core EXE
         run: cmake --build build --config Release
+
+      - name: Run core self-tests
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build/Release/SeowolYTMP3Downloader.exe' -ArgumentList '--self-test-core' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Core self-test failed with exit code $($p.ExitCode)." }
 
       - name: Verify portable MSVC runtime
         shell: pwsh
@@ -87,9 +103,4 @@ jobs:
         run: |
           $tag = "v$env:VERSION"
           $title = "Seowol YT MP3 Downloader v$env:VERSION"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag SeowolYTMP3Downloader.exe --clobber
-          } else {
-            gh release create $tag SeowolYTMP3Downloader.exe --target $env:GITHUB_SHA --title $title --notes-file RELEASE_NOTES.md
-          }
+          gh release create $tag SeowolYTMP3Downloader.exe --target $env:GITHUB_SHA --title $title --notes-file RELEASE_NOTES.md

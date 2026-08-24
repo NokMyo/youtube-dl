@@ -4,9 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +19,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Run core self-tests
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build/Release/SeowolYTMP3Downloader.exe' -ArgumentList '--self-test-core' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Core self-test failed with exit code $($p.ExitCode)." }
 
       - name: Verify portable MSVC runtime
         shell: pwsh
@@ -40,6 +50,13 @@ jobs:
           if (-not $ffmpeg -or -not $ffprobe) { throw 'FFmpeg binaries were not found.' }
           Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
           Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
+          @(
+            'Bundled components:',
+            '- yt-dlp: https://github.com/yt-dlp/yt-dlp',
+            '- FFmpeg: https://ffmpeg.org/',
+            '- Windows FFmpeg build: https://www.gyan.dev/ffmpeg/builds/',
+            'See the upstream projects for their respective licenses and source code.'
+          ) | Set-Content -Encoding UTF8 'payload/THIRD_PARTY_NOTICES.txt'
 
       - name: Build single-file EXE
         shell: pwsh
