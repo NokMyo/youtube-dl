@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <winhttp.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
@@ -63,6 +64,8 @@
 #define WM_APP_DOWNLOAD_DONE    (WM_APP + 7)
 #define WM_APP_FOLDER_STATS     (WM_APP + 8)
 #define WM_APP_TOOLS_READY      (WM_APP + 9)
+#define WM_APP_UPDATE_RESULT    (WM_APP + 10)
+#define WM_APP_SPLASH_STATUS    (WM_APP + 11)
 
 #define IDM_FILE_LOAD_TXT       2001
 #define IDM_FILE_BROWSE_FOLDER  2002
@@ -76,6 +79,12 @@
 #define IDM_TOOLS_REFRESH_STATS 2020
 #define IDM_TOOLS_OPEN_HISTORY  2021
 #define IDM_HELP_ABOUT          2030
+#define IDM_HELP_CHECK_UPDATES  2031
+#define IDM_HELP_RELEASES       2032
+
+#define UPDATE_ERROR            0
+#define UPDATE_CURRENT          1
+#define UPDATE_AVAILABLE        2
 
 typedef enum JobStatus {
     JOB_FETCHING = 0,
@@ -134,6 +143,11 @@ typedef struct FolderStatsResult {
     ULONGLONG bytes;
 } FolderStatsResult;
 
+typedef struct UpdateResult {
+    int state;
+    wchar_t latest[32];
+} UpdateResult;
+
 typedef struct MetadataLines {
     wchar_t meta[4096];
     wchar_t last[1024];
@@ -147,6 +161,7 @@ typedef struct DownloadLines {
 
 static HINSTANCE g_instance;
 static HWND g_main;
+static HWND g_splash;
 static HWND g_url_edit;
 static HWND g_list;
 static HWND g_folder_edit;
@@ -162,6 +177,8 @@ static HWND g_chk_sanitize;
 static HWND g_chk_clean;
 static HWND g_chk_size;
 static HFONT g_font;
+static HFONT g_splash_title_font;
+static HFONT g_splash_body_font;
 
 static Job g_jobs[MAX_JOBS];
 static int g_job_count = 0;
@@ -173,6 +190,9 @@ static HistoryNode *g_history[1024];
 static volatile LONG g_meta_running = 0;
 static volatile LONG g_download_running = 0;
 static volatile LONG g_tools_loading = 0;
+static volatile LONG g_update_running = 0;
+static volatile LONG g_startup_phase = 0;
+static volatile LONG g_splash_tick = 0;
 static volatile LONG g_stats_generation = 0;
 static volatile LONG g_opt_dedup = 1;
 static volatile LONG g_opt_skip = 1;
@@ -186,6 +206,10 @@ static wchar_t g_ffmpeg[MAX_PATH];
 static wchar_t g_ffmpeg_dir[MAX_PATH];
 static wchar_t g_tools_dir[MAX_PATH];
 static wchar_t g_history_folder[MAX_PATH];
+static int g_main_show_command = SW_SHOWNORMAL;
+static ULONGLONG g_splash_started = 0;
+
+static const wchar_t *RELEASES_URL = L"https://github.com/NokMyo/youtube-dl/releases";
 
 static BOOL FileExistsW2(const wchar_t *path) {
     DWORD a = GetFileAttributesW(path);
@@ -205,6 +229,12 @@ static void GetAppDirectory(wchar_t *out, size_t cch) {
     }
     wchar_t *slash = wcsrchr(out, L'\\');
     if (slash) *slash = L'\0';
+}
+
+static void SetStartupPhase(LONG phase) {
+    InterlockedExchange((LONG *)&g_startup_phase, phase);
+    HWND splash = g_splash;
+    if (splash) PostMessageW(splash, WM_APP_SPLASH_STATUS, 0, 0);
 }
 
 static BOOL FindTool(const wchar_t *name, wchar_t *out, size_t cch) {
@@ -334,6 +364,8 @@ static BOOL PrepareBundledTools(void) {
         CloseHandle(in);
         return TRUE;
     }
+
+    SetStartupPhase(2);
 
     wchar_t temp_dir[MAX_PATH], zip_path[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp_dir)) {
@@ -1451,7 +1483,9 @@ static void StartDownload(BOOL failed_only) {
 
 static unsigned __stdcall ToolPreparationThread(void *param) {
     (void)param;
+    SetStartupPhase(1);
     PrepareBundledTools();
+    SetStartupPhase(3);
     RefreshTools();
     BOOL available = ToolsAvailable();
     InterlockedExchange((LONG *)&g_tools_loading, 0);
@@ -1531,7 +1565,10 @@ static HMENU CreateAppMenu(void) {
 
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_REFRESH_STATS, L"폴더 정보 새로 고침");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
-    AppendMenuW(help, MF_STRING, IDM_HELP_ABOUT, L"프로그램 정보");
+    AppendMenuW(help, MF_STRING, IDM_HELP_CHECK_UPDATES, L"업데이트 확인...");
+    AppendMenuW(help, MF_STRING, IDM_HELP_RELEASES, L"릴리스 정보 보기");
+    AppendMenuW(help, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(help, MF_STRING, IDM_HELP_ABOUT, L"프로그램 정보...");
 
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"파일(&F)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)job, L"작업(&A)");
@@ -1663,6 +1700,284 @@ static void OpenHistoryFile(void) {
     ShellExecuteW(g_main, L"open", path, NULL, NULL, SW_SHOWNORMAL);
 }
 
+static void OpenWebPage(HWND owner, const wchar_t *url) {
+    HINSTANCE opened = ShellExecuteW(owner, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)opened <= 32) {
+        MessageBoxW(owner, L"웹 페이지를 열지 못했습니다.", APP_TITLE, MB_OK | MB_ICONERROR);
+    }
+}
+
+static BOOL ParseSemanticVersion(const wchar_t *text, int parts[3]) {
+    if (!text || !parts) return FALSE;
+    const wchar_t *cursor = text;
+    if (*cursor == L'v' || *cursor == L'V') cursor++;
+    for (int i = 0; i < 3; ++i) {
+        if (!iswdigit(*cursor)) return FALSE;
+        unsigned int value = 0;
+        while (iswdigit(*cursor)) {
+            value = value * 10U + (unsigned int)(*cursor - L'0');
+            if (value > 65535U) return FALSE;
+            cursor++;
+        }
+        parts[i] = (int)value;
+        if (i < 2) {
+            if (*cursor != L'.') return FALSE;
+            cursor++;
+        }
+    }
+    return !*cursor || *cursor == L'-' || *cursor == L'+';
+}
+
+static int CompareSemanticVersion(const wchar_t *left, const wchar_t *right) {
+    int a[3], b[3];
+    if (!ParseSemanticVersion(left, a) || !ParseSemanticVersion(right, b)) return 0;
+    for (int i = 0; i < 3; ++i) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
+}
+
+static BOOL ExtractReleaseTag(const char *json, wchar_t *version, size_t cch) {
+    if (!json || !version || cch < 2) return FALSE;
+    const char *key = strstr(json, "\"tag_name\"");
+    if (!key) return FALSE;
+    const char *colon = strchr(key + 10, ':');
+    if (!colon) return FALSE;
+    const char *first = strchr(colon + 1, '"');
+    if (!first) return FALSE;
+    first++;
+    if (*first == 'v' || *first == 'V') first++;
+    const char *last = strchr(first, '"');
+    if (!last || last == first || memchr(first, '\\', (size_t)(last - first))) return FALSE;
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, first,
+                                    (int)(last - first), version, (int)cch - 1);
+    if (count <= 0) return FALSE;
+    version[count] = 0;
+    int parts[3];
+    return ParseSemanticVersion(version, parts);
+}
+
+static BOOL FetchLatestVersion(wchar_t *version, size_t cch) {
+    BOOL ok = FALSE;
+    HINTERNET session = NULL, connection = NULL, request = NULL;
+    wchar_t user_agent[96];
+    StringCchPrintfW(user_agent, 96, L"SeowolYTMP3Downloader/%s", APP_VERSION_W);
+
+    session = WinHttpOpen(user_agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) goto cleanup;
+    WinHttpSetTimeouts(session, 3000, 5000, 5000, 10000);
+    connection = WinHttpConnect(session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connection) goto cleanup;
+    request = WinHttpOpenRequest(connection, L"GET",
+        L"/repos/NokMyo/youtube-dl/releases/latest", NULL, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!request) goto cleanup;
+
+    const wchar_t *headers =
+        L"Accept: application/vnd.github+json\r\n"
+        L"X-GitHub-Api-Version: 2022-11-28\r\n";
+    if (!WinHttpAddRequestHeaders(request, headers, (DWORD)-1L,
+                                  WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE) ||
+        !WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) goto cleanup;
+
+    DWORD status = 0, status_size = sizeof(status);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+                             WINHTTP_NO_HEADER_INDEX) || status != 200) goto cleanup;
+
+    char response[64 * 1024];
+    const DWORD response_capacity = (DWORD)sizeof(response);
+    DWORD total = 0;
+    while (total < response_capacity - 1) {
+        DWORD read_bytes = 0;
+        if (!WinHttpReadData(request, response + total,
+                             response_capacity - 1 - total, &read_bytes)) goto cleanup;
+        if (!read_bytes) break;
+        total += read_bytes;
+    }
+    response[total] = 0;
+    ok = total > 0 && ExtractReleaseTag(response, version, cch);
+
+cleanup:
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    return ok;
+}
+
+static unsigned __stdcall UpdateCheckThread(void *param) {
+    HWND notify = (HWND)param;
+    UpdateResult *result = (UpdateResult *)calloc(1, sizeof(UpdateResult));
+    if (result && FetchLatestVersion(result->latest, 32)) {
+        result->state = CompareSemanticVersion(APP_VERSION_W, result->latest) < 0
+            ? UPDATE_AVAILABLE : UPDATE_CURRENT;
+    }
+    InterlockedExchange((LONG *)&g_update_running, 0);
+    if (!PostMessageW(notify, WM_APP_UPDATE_RESULT, 0, (LPARAM)result)) free(result);
+    return 0;
+}
+
+static void StartUpdateCheck(void) {
+    if (InterlockedCompareExchange((LONG *)&g_update_running, 1, 0) != 0) {
+        MessageBoxW(g_main, L"업데이트를 확인하고 있습니다.", APP_TITLE,
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    HMENU menu = GetMenu(g_main);
+    EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_GRAYED);
+    DrawMenuBar(g_main);
+    SetControlText(g_status, L"상태: 업데이트 확인 중...");
+    uintptr_t thread = _beginthreadex(NULL, 0, UpdateCheckThread, g_main, 0, NULL);
+    if (thread) {
+        CloseHandle((HANDLE)thread);
+        return;
+    }
+    InterlockedExchange((LONG *)&g_update_running, 0);
+    EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_ENABLED);
+    DrawMenuBar(g_main);
+    MessageBoxW(g_main, L"업데이트 확인 작업을 시작하지 못했습니다.", APP_TITLE,
+                MB_OK | MB_ICONERROR);
+}
+
+static const wchar_t *StartupStatusText(void) {
+    switch (InterlockedCompareExchange((LONG *)&g_startup_phase, 0, 0)) {
+        case 1: return L"필수 도구를 확인하고 있습니다...";
+        case 2: return L"처음 실행에 필요한 도구를 준비하고 있습니다...";
+        case 3: return L"사용 환경을 확인하고 있습니다...";
+        case 4: return L"프로그램을 시작하고 있습니다...";
+        default: return L"프로그램을 초기화하고 있습니다...";
+    }
+}
+
+static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)wParam;
+    (void)lParam;
+    switch (msg) {
+        case WM_CREATE:
+            SetTimer(hwnd, 1, 90, NULL);
+            return 0;
+        case WM_TIMER:
+            InterlockedIncrement((LONG *)&g_splash_tick);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case WM_APP_SPLASH_STATUS:
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client;
+            GetClientRect(hwnd, &client);
+            FillRect(dc, &client, GetSysColorBrush(COLOR_BTNFACE));
+
+            RECT banner = {0, 0, client.right, 84};
+            HBRUSH navy = CreateSolidBrush(RGB(0, 0, 112));
+            FillRect(dc, &banner, navy);
+            DeleteObject(navy);
+            SetBkMode(dc, TRANSPARENT);
+
+            HFONT title_font = g_splash_title_font
+                ? g_splash_title_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            HFONT body_font = g_splash_body_font
+                ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            HFONT old_font = (HFONT)SelectObject(dc, title_font);
+            SetTextColor(dc, RGB(255, 255, 255));
+            RECT title = {24, 16, client.right - 20, 49};
+            DrawTextW(dc, L"Seowol", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+            SelectObject(dc, body_font);
+            RECT subtitle = {26, 51, client.right - 20, 76};
+            DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &subtitle, DT_LEFT | DT_SINGLELINE);
+
+            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+            wchar_t version_text[64];
+            StringCchPrintfW(version_text, 64, L"버전 %s", APP_VERSION_W);
+            RECT version = {24, 103, client.right - 24, 124};
+            DrawTextW(dc, version_text, -1, &version, DT_LEFT | DT_SINGLELINE);
+            RECT description = {24, 130, client.right - 24, 151};
+            DrawTextW(dc, L"YouTube 링크를 MP3 파일로 정리하는 Windows 프로그램", -1,
+                      &description, DT_LEFT | DT_SINGLELINE);
+            RECT status = {24, 165, client.right - 24, 187};
+            DrawTextW(dc, StartupStatusText(), -1, &status, DT_LEFT | DT_SINGLELINE);
+
+            RECT progress = {24, 194, client.right - 24, 212};
+            DrawEdge(dc, &progress, EDGE_SUNKEN, BF_RECT);
+            InflateRect(&progress, -3, -3);
+            int block_count = 18;
+            int gap = 2;
+            int block_width = (progress.right - progress.left - gap * (block_count - 1)) / block_count;
+            int active = (int)(InterlockedCompareExchange((LONG *)&g_splash_tick, 0, 0) % block_count);
+            HBRUSH active_brush = CreateSolidBrush(RGB(0, 0, 160));
+            HBRUSH idle_brush = GetSysColorBrush(COLOR_3DFACE);
+            for (int i = 0; i < block_count; ++i) {
+                RECT block = {
+                    progress.left + i * (block_width + gap), progress.top,
+                    progress.left + i * (block_width + gap) + block_width, progress.bottom
+                };
+                int distance = (i - active + block_count) % block_count;
+                FillRect(dc, &block, distance < 3 ? active_brush : idle_brush);
+            }
+            DeleteObject(active_brush);
+
+            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            RECT copyright = {24, 225, client.right - 24, 245};
+            DrawTextW(dc, APP_COPYRIGHT_W, -1, &copyright, DT_LEFT | DT_SINGLELINE);
+            SelectObject(dc, old_font);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_CLOSE:
+            return 0;
+        case WM_DESTROY:
+            KillTimer(hwnd, 1);
+            return 0;
+        case WM_NCDESTROY:
+            if (g_splash == hwnd) g_splash = NULL;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static BOOL CreateSplashWindow(void) {
+    g_splash_title_font = CreateFontW(-27, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Tahoma");
+    g_splash_body_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        HANGEUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
+    int width = 460, height = 258;
+    int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+    int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+    g_splash = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"SeowolYTMP3SplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
+        x, y, width, height, NULL, NULL, g_instance, NULL);
+    if (!g_splash) return FALSE;
+    g_splash_started = GetTickCount64();
+    ShowWindow(g_splash, SW_SHOWNORMAL);
+    UpdateWindow(g_splash);
+    return TRUE;
+}
+
+static void ShowMainAfterSplash(HWND hwnd) {
+    if (g_splash) {
+        ULONGLONG elapsed = GetTickCount64() - g_splash_started;
+        if (elapsed < 250) {
+            SetStartupPhase(4);
+            SetTimer(hwnd, 2, (UINT)(250 - elapsed), NULL);
+            return;
+        }
+        DestroyWindow(g_splash);
+    }
+    ShowWindow(hwnd, g_main_show_command);
+    UpdateWindow(hwnd);
+    SetForegroundWindow(hwnd);
+}
+
 static void CenterDialog(HWND dialog) {
     RECT dialog_rect, owner_rect;
     HWND owner = GetWindow(dialog, GW_OWNER);
@@ -1730,7 +2045,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetMenu(hwnd, CreateAppMenu());
             CreateUi(hwnd);
             SetControlText(g_status, L"다운로드 구성 요소 준비 중...");
-            StartToolPreparation();
             return 0;
 
         case WM_COMMAND: {
@@ -1759,6 +2073,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_JOB_CLEAR: ClearJobs(); break;
                 case IDM_TOOLS_REFRESH_STATS: UpdateFolderStatsUI(); break;
                 case IDM_TOOLS_OPEN_HISTORY: OpenHistoryFile(); break;
+                case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(); break;
+                case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
                 case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
@@ -1838,8 +2154,54 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ApplyFolderStatsResult((FolderStatsResult *)lParam);
             return 0;
 
+        case WM_APP_UPDATE_RESULT: {
+            UpdateResult *update = (UpdateResult *)lParam;
+            HMENU menu = GetMenu(hwnd);
+            EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_ENABLED);
+            DrawMenuBar(hwnd);
+            if (update && update->state == UPDATE_AVAILABLE) {
+                wchar_t message[256];
+                StringCchPrintfW(message, 256,
+                    L"새 버전 %s을 사용할 수 있습니다.\r\n\r\n"
+                    L"현재 버전: %s\r\n최신 버전: %s\r\n\r\n"
+                    L"다운로드 페이지를 여시겠습니까?",
+                    update->latest, APP_VERSION_W, update->latest);
+                if (MessageBoxW(hwnd, message, L"업데이트 확인",
+                                MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                    wchar_t url[256];
+                    StringCchPrintfW(url, 256,
+                        L"https://github.com/NokMyo/youtube-dl/releases/tag/v%s", update->latest);
+                    OpenWebPage(hwnd, url);
+                }
+            } else if (update && update->state == UPDATE_CURRENT) {
+                wchar_t message[160];
+                StringCchPrintfW(message, 160,
+                    L"현재 최신 버전을 사용하고 있습니다.\r\n\r\n버전 %s", APP_VERSION_W);
+                MessageBoxW(hwnd, message, L"업데이트 확인", MB_OK | MB_ICONINFORMATION);
+            } else {
+                if (MessageBoxW(hwnd,
+                    L"업데이트 정보를 가져오지 못했습니다.\r\n\r\n"
+                    L"GitHub 릴리스 페이지에서 직접 확인하시겠습니까?",
+                    L"업데이트 확인", MB_YESNO | MB_ICONWARNING) == IDYES) {
+                    OpenWebPage(hwnd, RELEASES_URL);
+                }
+            }
+            free(update);
+            if (!g_meta_running && !g_download_running) SetControlText(g_status, L"준비 완료");
+            return 0;
+        }
+
         case WM_APP_TOOLS_READY:
             SetControlText(g_status, wParam ? L"준비 완료" : L"상태: yt-dlp 또는 ffmpeg를 찾을 수 없음");
+            SetStartupPhase(4);
+            ShowMainAfterSplash(hwnd);
+            return 0;
+
+        case WM_TIMER:
+            if (wParam == 2) {
+                KillTimer(hwnd, 2);
+                ShowMainAfterSplash(hwnd);
+            }
             return 0;
 
         case WM_SIZE:
@@ -1900,6 +2262,16 @@ static BOOL RunCoreSelfTests(void) {
     if (wcscmp(cleaned, L"가수 - 노래.mp3")) return FALSE;
     Filename_BuildClean(L"가수 - 노래 (Live)", L"", L"", TRUE, TRUE, cleaned, 256);
     if (wcscmp(cleaned, L"가수 - 노래 (Live).mp3")) return FALSE;
+
+    int version_parts[3];
+    if (!ParseSemanticVersion(L"v1.2.30", version_parts) ||
+        version_parts[0] != 1 || version_parts[1] != 2 || version_parts[2] != 30 ||
+        ParseSemanticVersion(L"1.2", version_parts) ||
+        CompareSemanticVersion(L"1.0.5", L"1.1.0") >= 0 ||
+        CompareSemanticVersion(L"2.0.0", L"1.9.9") <= 0) return FALSE;
+    wchar_t release_version[32];
+    if (!ExtractReleaseTag("{\"tag_name\":\"v1.1.0\"}", release_version, 32) ||
+        wcscmp(release_version, L"1.1.0")) return FALSE;
     return TRUE;
 }
 
@@ -1934,6 +2306,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
+    WNDCLASSEXW splash_wc;
+    ZeroMemory(&splash_wc, sizeof(splash_wc));
+    splash_wc.cbSize = sizeof(splash_wc);
+    splash_wc.style = CS_DROPSHADOW;
+    splash_wc.lpfnWndProc = SplashProc;
+    splash_wc.hInstance = hInstance;
+    splash_wc.hCursor = LoadCursorW(NULL, IDC_WAIT);
+    splash_wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    splash_wc.lpszClassName = L"SeowolYTMP3SplashWin32";
+    if (!RegisterClassExW(&splash_wc)) goto cleanup;
+
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
@@ -1957,8 +2340,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, APP_TITLE, style,
                                 x, y, width, height, NULL, NULL, hInstance, NULL);
     if (!hwnd) goto cleanup;
-    ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
+    g_main_show_command = nCmdShow;
+    if (!CreateSplashWindow()) {
+        ShowWindow(hwnd, nCmdShow);
+        UpdateWindow(hwnd);
+    }
+    StartToolPreparation();
 
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
@@ -1977,6 +2364,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     }
 
 cleanup:
+    if (g_splash && IsWindow(g_splash)) DestroyWindow(g_splash);
+    if (g_splash_title_font) DeleteObject(g_splash_title_font);
+    if (g_splash_body_font) DeleteObject(g_splash_body_font);
     EnterCriticalSection(&g_history_lock);
     HistoryClearUnlocked();
     LeaveCriticalSection(&g_history_lock);

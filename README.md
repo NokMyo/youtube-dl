@@ -23,7 +23,8 @@
 - 항목 상태에 개별 진행률 표시 및 전체 진행률 표시
 - Windows 95/2000풍 클래식 메뉴·상태 표시줄
 - 제품 버전·저작권·라이선스를 확인할 수 있는 프로그램 정보 창
-- 첫 실행 구성 요소를 뒤에서 준비해 프로그램 창을 빠르게 표시
+- 앱 안에서 최신 버전을 확인하고 릴리스 정보를 여는 도움말 메뉴
+- 별도 시작 화면에서 구성 요소 준비 상태를 표시한 뒤 프로그램 창 실행
 
 ## 기본 저장 위치
 
@@ -39,7 +40,7 @@ Music\YouTubeMP3
 SeowolYTMP3Downloader.exe
 ```
 
-첫 실행 시 내장된 `yt-dlp`, `ffmpeg`, `ffprobe`가 `%LOCALAPPDATA%\SeowolYTMP3Downloader\tools`에 뒤에서 자동으로 준비되고 이후 재사용됩니다.
+첫 실행 시 별도 시작 화면이 표시되며 내장된 `yt-dlp`, `ffmpeg`, `ffprobe`가 `%LOCALAPPDATA%\SeowolYTMP3Downloader\tools`에 자동으로 준비됩니다. 이후 실행에서는 준비된 도구를 재사용합니다.
 
 ## 빌드
 

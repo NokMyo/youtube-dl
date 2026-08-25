@@ -68,4 +68,5 @@ target_link_libraries(SeowolYTMP3Downloader PRIVATE
     shell32
     ole32
     uxtheme
+    winhttp
 )
