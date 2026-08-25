@@ -59,7 +59,7 @@ Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
 Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
 Copy-Item 'LICENSE.txt' 'payload/APPLICATION_LICENSE.txt'
 
-Invoke-VerifiedDownload -Uri 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile 'payload/GPL-3.0.txt'
+Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.GPLv3' -OutFile 'payload/GPL-3.0.txt'
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/LICENSE' -OutFile 'payload/YT-DLP-UNLICENSE.txt'
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/THIRD_PARTY_LICENSES.txt' -OutFile 'payload/YT-DLP-THIRD-PARTY-LICENSES.txt'
 
