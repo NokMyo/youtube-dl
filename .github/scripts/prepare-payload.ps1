@@ -1,8 +1,55 @@
 $ErrorActionPreference = 'Stop'
 
+function Invoke-VerifiedDownload {
+  param(
+    [Parameter(Mandatory = $true)][string]$Uri,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [string]$Sha256 = ''
+  )
+
+  $lastError = $null
+  for ($attempt = 1; $attempt -le 4; $attempt++) {
+    try {
+      Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+      Invoke-WebRequest -Uri $Uri -OutFile $OutFile -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 300
+      if (-not (Test-Path -LiteralPath $OutFile) -or (Get-Item -LiteralPath $OutFile).Length -eq 0) {
+        throw "Downloaded file is empty: $Uri"
+      }
+
+      if ($Sha256) {
+        $actual = (Get-FileHash -LiteralPath $OutFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $Sha256.ToLowerInvariant()) {
+          throw "SHA-256 mismatch for $Uri"
+        }
+      }
+      return
+    } catch {
+      $lastError = $_
+      if ($attempt -lt 4) {
+        Start-Sleep -Seconds ([Math]::Min(5 * $attempt, 15))
+      }
+    }
+  }
+
+  throw "Download failed after 4 attempts: $Uri`n$lastError"
+}
+
 New-Item -ItemType Directory -Force payload | Out-Null
-Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'payload/yt-dlp.exe'
-Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'ffmpeg.zip'
+Invoke-VerifiedDownload -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'payload/yt-dlp.exe'
+Invoke-VerifiedDownload -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS' -OutFile 'yt-dlp-SHA2-256SUMS.txt'
+
+$ytDlpLine = Get-Content -LiteralPath 'yt-dlp-SHA2-256SUMS.txt' |
+  Where-Object { $_ -match '^(?<hash>[0-9a-fA-F]{64})\s+\*?yt-dlp\.exe\s*$' } |
+  Select-Object -First 1
+if (-not $ytDlpLine) { throw 'yt-dlp.exe checksum was not found.' }
+$null = $ytDlpLine -match '^(?<hash>[0-9a-fA-F]{64})'
+$ytDlpActual = (Get-FileHash -LiteralPath 'payload/yt-dlp.exe' -Algorithm SHA256).Hash
+if ($ytDlpActual -ne $Matches.hash) { throw 'yt-dlp.exe SHA-256 verification failed.' }
+
+$ffmpegVersion = '9.0.1'
+$ffmpegSha256 = 'fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9'
+$ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$ffmpegVersion/ffmpeg-$ffmpegVersion-essentials_build.zip"
+Invoke-VerifiedDownload -Uri $ffmpegUrl -OutFile 'ffmpeg.zip' -Sha256 $ffmpegSha256
 Expand-Archive -LiteralPath 'ffmpeg.zip' -DestinationPath 'ffmpeg-dist' -Force
 
 $ffmpeg = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
@@ -12,9 +59,9 @@ Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
 Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
 Copy-Item 'LICENSE.txt' 'payload/APPLICATION_LICENSE.txt'
 
-Invoke-WebRequest -Uri 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile 'payload/GPL-3.0.txt'
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/LICENSE' -OutFile 'payload/YT-DLP-UNLICENSE.txt'
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/THIRD_PARTY_LICENSES.txt' -OutFile 'payload/YT-DLP-THIRD-PARTY-LICENSES.txt'
+Invoke-VerifiedDownload -Uri 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile 'payload/GPL-3.0.txt'
+Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/LICENSE' -OutFile 'payload/YT-DLP-UNLICENSE.txt'
+Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/THIRD_PARTY_LICENSES.txt' -OutFile 'payload/YT-DLP-THIRD-PARTY-LICENSES.txt'
 
 $ffmpegLicense = & 'payload/ffmpeg.exe' -hide_banner -L 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the FFmpeg license information.' }
