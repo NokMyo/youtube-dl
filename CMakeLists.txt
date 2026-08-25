@@ -10,6 +10,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(SeowolYTMP3Downloader WIN32
+    src/command_line.c
+    src/filename.c
     src/main.c
 )
 

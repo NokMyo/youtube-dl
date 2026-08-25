@@ -14,12 +14,14 @@
 - 이미 다운로드한 곡 건너뛰기 옵션
 - 실패한 항목만 다시 다운로드
 - Windows 파일명 금지 문자 자동 제거
-- `아티스트 - 곡명.mp3` 형태의 파일명 자동 정리
+- `아티스트 - 곡명.mp3` 형태의 파일명 자동 정리와 공식 영상 표기 괄호 제거
 - 원본 제목 / 정리된 파일명 미리보기
 - 다운로드 전 예상 MP3 용량 표시
 - 저장 폴더의 MP3 곡 수 / 총 용량 표시
 - `download_history.txt` 기반 다운로드 이력 관리
-- 순차 다운로드 및 개별/전체 진행률 표시
+- 메타데이터 4개 병렬 조회와 최대 2개 병렬 다운로드
+- 항목 상태에 개별 진행률 표시 및 전체 진행률 표시
+- Windows 95/2000풍 클래식 메뉴·상태 표시줄
 
 ## 기본 저장 위치
 
@@ -78,6 +80,12 @@ Mrs. GREEN APPLE「点描の唄」Official Music Video
 
 Lauv - I Like Me Better [Official Audio]
 → Lauv - I Like Me Better.mp3
+
+가수 - 노래 (공식 뮤비)
+→ 가수 - 노래.mp3
+
+가수 - 노래 (Live)
+→ 가수 - 노래 (Live).mp3
 ```
 
 자동 정리가 완벽할 수는 없으므로 프로그램에서 최종 파일명을 미리 확인할 수 있습니다.
@@ -87,6 +95,8 @@ Lauv - I Like Me Better [Official Audio]
 ```text
 .
 ├─ src/
+│  ├─ command_line.c / command_line.h
+│  ├─ filename.c / filename.h
 │  └─ main.c
 ├─ .github/workflows/
 │  ├─ build.yml

@@ -18,6 +18,9 @@
 #include <wctype.h>
 #include <string.h>
 
+#include "command_line.h"
+#include "filename.h"
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -27,8 +30,10 @@
 #define APP_TITLE L"Seowol YT MP3 Downloader"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
-#define APP_CLIENT_W 1220
-#define APP_CLIENT_H 820
+#define APP_CLIENT_W 1060
+#define APP_CLIENT_H 700
+#define META_WORKER_COUNT 4
+#define DOWNLOAD_WORKER_COUNT 2
 
 #define IDC_URL_EDIT            1001
 #define IDC_ADD_LINKS           1002
@@ -57,11 +62,22 @@
 #define WM_APP_JOB_UPDATED      (WM_APP + 1)
 #define WM_APP_REBUILD_LIST     (WM_APP + 2)
 #define WM_APP_META_DONE        (WM_APP + 3)
-#define WM_APP_CURRENT_JOB      (WM_APP + 4)
-#define WM_APP_CURRENT_PROGRESS (WM_APP + 5)
 #define WM_APP_OVERALL          (WM_APP + 6)
 #define WM_APP_DOWNLOAD_DONE    (WM_APP + 7)
 #define WM_APP_FOLDER_STATS     (WM_APP + 8)
+
+#define IDM_FILE_LOAD_TXT       2001
+#define IDM_FILE_BROWSE_FOLDER  2002
+#define IDM_FILE_OPEN_FOLDER    2003
+#define IDM_FILE_EXIT           2004
+#define IDM_JOB_ADD_LINKS       2010
+#define IDM_JOB_REMOVE_DUP      2011
+#define IDM_JOB_DOWNLOAD_ALL    2012
+#define IDM_JOB_RETRY_FAILED    2013
+#define IDM_JOB_CLEAR           2014
+#define IDM_TOOLS_REFRESH_STATS 2020
+#define IDM_TOOLS_OPEN_HISTORY  2021
+#define IDM_HELP_ABOUT          2030
 
 typedef enum JobStatus {
     JOB_FETCHING = 0,
@@ -95,6 +111,24 @@ typedef struct DownloadBatch {
     wchar_t folder[MAX_PATH];
 } DownloadBatch;
 
+typedef struct MetaWork {
+    volatile LONG next;
+    int end;
+} MetaWork;
+
+typedef struct DownloadWork {
+    int indices[MAX_JOBS];
+    int total;
+    volatile LONG next;
+    volatile LONG done;
+    wchar_t folder[MAX_PATH];
+} DownloadWork;
+
+typedef struct HistoryNode {
+    wchar_t id[128];
+    struct HistoryNode *next;
+} HistoryNode;
+
 typedef struct MetadataLines {
     wchar_t meta[4096];
     wchar_t last[1024];
@@ -126,6 +160,9 @@ static HFONT g_font;
 static Job g_jobs[MAX_JOBS];
 static int g_job_count = 0;
 static CRITICAL_SECTION g_jobs_lock;
+static CRITICAL_SECTION g_file_lock;
+static CRITICAL_SECTION g_history_lock;
+static HistoryNode *g_history[1024];
 static volatile LONG g_meta_running = 0;
 static volatile LONG g_download_running = 0;
 static volatile LONG g_opt_dedup = 1;
@@ -182,71 +219,6 @@ static void DirectoryFromPath(const wchar_t *path, wchar_t *out, size_t cch) {
     StringCchCopyW(out, cch, path);
     wchar_t *slash = wcsrchr(out, L'\\');
     if (slash) *slash = L'\0';
-}
-
-static BOOL AppendCommandChar(wchar_t *command, size_t cch, size_t *length, wchar_t value) {
-    if (*length + 1 >= cch) return FALSE;
-    command[(*length)++] = value;
-    command[*length] = 0;
-    return TRUE;
-}
-
-/*
- * Quote one argument according to the CommandLineToArgvW/MSVC parsing rules.
- * Building the command from arguments avoids malformed paths (especially a
- * trailing backslash) and prevents editable text from becoming a yt-dlp option.
- */
-static BOOL AppendCommandArgument(wchar_t *command, size_t cch, const wchar_t *argument) {
-    if (!command || !argument || !cch) return FALSE;
-    size_t length = wcslen(command);
-    if (length >= cch) return FALSE;
-    if (length && !AppendCommandChar(command, cch, &length, L' ')) return FALSE;
-    if (!AppendCommandChar(command, cch, &length, L'"')) return FALSE;
-
-    size_t backslashes = 0;
-    for (const wchar_t *p = argument;; ++p) {
-        if (*p == L'\\') {
-            backslashes++;
-            continue;
-        }
-
-        size_t copies = *p == L'"' ? backslashes * 2 + 1 : backslashes;
-        if (!*p) copies = backslashes * 2;
-        for (size_t i = 0; i < copies; ++i) {
-            if (!AppendCommandChar(command, cch, &length, L'\\')) return FALSE;
-        }
-        backslashes = 0;
-
-        if (!*p) break;
-        if (!AppendCommandChar(command, cch, &length, *p)) return FALSE;
-    }
-
-    return AppendCommandChar(command, cch, &length, L'"');
-}
-
-static BOOL BuildCommandLine(wchar_t *command, size_t cch,
-                             const wchar_t *const *arguments, size_t argument_count) {
-    if (!command || !cch || !arguments || !argument_count) return FALSE;
-    command[0] = 0;
-    for (size_t i = 0; i < argument_count; ++i) {
-        if (!AppendCommandArgument(command, cch, arguments[i])) {
-            command[0] = 0;
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
-static BOOL EscapePowerShellSingleQuoted(const wchar_t *input, wchar_t *output, size_t cch) {
-    if (!input || !output || !cch) return FALSE;
-    size_t written = 0;
-    for (size_t i = 0; input[i]; ++i) {
-        if (written + (input[i] == L'\'' ? 2 : 1) >= cch) return FALSE;
-        output[written++] = input[i];
-        if (input[i] == L'\'') output[written++] = L'\'';
-    }
-    output[written] = 0;
-    return TRUE;
 }
 
 static BOOL RunHiddenProcess(const wchar_t *command) {
@@ -408,14 +380,14 @@ static BOOL PrepareBundledTools(void) {
 
     wchar_t command[4096];
     const wchar_t *const tar_args[] = { L"tar.exe", L"-xf", zip_path, L"-C", g_tools_dir };
-    BOOL extracted = BuildCommandLine(command, 4096, tar_args, sizeof(tar_args) / sizeof(tar_args[0])) &&
+    BOOL extracted = CommandLine_Build(command, 4096, tar_args, sizeof(tar_args) / sizeof(tar_args[0])) &&
                      RunHiddenProcess(command);
     if (!extracted) {
         wchar_t escaped_zip[MAX_PATH * 2];
         wchar_t escaped_tools[MAX_PATH * 2];
         wchar_t script[2048];
-        if (EscapePowerShellSingleQuoted(zip_path, escaped_zip, MAX_PATH * 2) &&
-            EscapePowerShellSingleQuoted(g_tools_dir, escaped_tools, MAX_PATH * 2) &&
+        if (PowerShell_EscapeSingleQuoted(zip_path, escaped_zip, MAX_PATH * 2) &&
+            PowerShell_EscapeSingleQuoted(g_tools_dir, escaped_tools, MAX_PATH * 2) &&
             SUCCEEDED(StringCchPrintfW(script, 2048,
                 L"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force",
                 escaped_zip, escaped_tools))) {
@@ -423,7 +395,7 @@ static BOOL PrepareBundledTools(void) {
                 L"powershell.exe", L"-NoProfile", L"-NonInteractive",
                 L"-ExecutionPolicy", L"Bypass", L"-Command", script
             };
-            extracted = BuildCommandLine(command, 4096, powershell_args,
+            extracted = CommandLine_Build(command, 4096, powershell_args,
                                           sizeof(powershell_args) / sizeof(powershell_args[0])) &&
                         RunHiddenProcess(command);
         }
@@ -456,195 +428,19 @@ static void TrimInPlace(wchar_t *s) {
     while (n && iswspace(s[n - 1])) s[--n] = 0;
 }
 
-static void CollapseSpaces(wchar_t *s) {
-    size_t r = 0, w = 0;
-    BOOL prev_space = FALSE;
-    while (s[r]) {
-        wchar_t c = s[r++];
-        BOOL space = iswspace(c) ? TRUE : FALSE;
-        if (space) {
-            if (!prev_space) s[w++] = L' ';
-        } else {
-            s[w++] = c;
-        }
-        prev_space = space;
-    }
-    s[w] = 0;
-    TrimInPlace(s);
-}
-
-static wchar_t *WcsIstr(wchar_t *haystack, const wchar_t *needle) {
-    if (!needle || !*needle) return haystack;
-    size_t n = wcslen(needle);
-    for (wchar_t *p = haystack; *p; ++p) {
-        size_t i = 0;
-        while (i < n && p[i] && towlower(p[i]) == towlower(needle[i])) i++;
-        if (i == n) return p;
-    }
-    return NULL;
-}
-
-static BOOL ContainsCI(const wchar_t *text, const wchar_t *needle) {
-    return WcsIstr((wchar_t *)text, needle) != NULL;
-}
-
-static void RemovePhraseCI(wchar_t *text, const wchar_t *phrase) {
-    size_t n = wcslen(phrase);
-    if (!n) return;
-    for (;;) {
-        wchar_t *p = WcsIstr(text, phrase);
-        if (!p) break;
-        memmove(p, p + n, (wcslen(p + n) + 1) * sizeof(wchar_t));
-    }
-}
-
-static BOOL NoiseText(const wchar_t *text) {
-    static const wchar_t *keys[] = {
-        L"official", L"music video", L"lyric", L"lyrics", L"가사",
-        L"official audio", L"visualizer", L"m/v", L" mv", L"audio"
-    };
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
-        if (ContainsCI(text, keys[i])) return TRUE;
-    }
-    return FALSE;
-}
-
-static void RemoveNoiseBrackets(wchar_t *text, wchar_t open, wchar_t close) {
-    wchar_t *p = text;
-    while ((p = wcschr(p, open)) != NULL) {
-        wchar_t *q = wcschr(p + 1, close);
-        if (!q) break;
-        size_t len = (size_t)(q - p - 1);
-        wchar_t inside[512];
-        if (len >= 511) len = 511;
-        wcsncpy(inside, p + 1, len);
-        inside[len] = 0;
-        if (NoiseText(inside)) {
-            memmove(p, q + 1, (wcslen(q + 1) + 1) * sizeof(wchar_t));
-        } else {
-            p = q + 1;
-        }
-    }
-}
-
-static BOOL IsReservedDeviceName(const wchar_t *name) {
-    wchar_t base[32];
-    size_t i = 0;
-    while (name[i] && name[i] != L'.' && i < 31) {
-        base[i] = towupper(name[i]);
-        i++;
-    }
-    while (i && iswspace(base[i - 1])) i--;
-    base[i] = 0;
-    if (!_wcsicmp(base, L"CON") || !_wcsicmp(base, L"PRN") ||
-        !_wcsicmp(base, L"AUX") || !_wcsicmp(base, L"NUL")) return TRUE;
-    if ((wcsncmp(base, L"COM", 3) == 0 || wcsncmp(base, L"LPT", 3) == 0) &&
-        wcslen(base) == 4 && base[3] >= L'1' && base[3] <= L'9') return TRUE;
-    return FALSE;
-}
-
-static BOOL IsSafeFilename(const wchar_t *name) {
-    static const wchar_t *bad = L"<>:\"/\\|?*";
-    if (!name || !*name || !wcscmp(name, L".") || !wcscmp(name, L"..")) return FALSE;
-    for (size_t i = 0; name[i]; ++i) {
-        if (name[i] < 32 || wcschr(bad, name[i])) return FALSE;
-    }
-    size_t n = wcslen(name);
-    if (!n || name[n - 1] == L'.' || name[n - 1] == L' ') return FALSE;
-    return !IsReservedDeviceName(name);
-}
-
-static BOOL IsHttpUrl(const wchar_t *url) {
-    return url && (!_wcsnicmp(url, L"http://", 7) || !_wcsnicmp(url, L"https://", 8));
-}
-
-static void SanitizeFilename(wchar_t *s, size_t cch) {
-    if (!s || !cch) return;
-    if (cch == 1) {
-        s[0] = 0;
-        return;
-    }
-    static const wchar_t *bad = L"<>:\"/\\|?*";
-    for (size_t i = 0; s[i]; ++i) {
-        if (s[i] < 32 || wcschr(bad, s[i])) s[i] = L' ';
-    }
-    CollapseSpaces(s);
-    size_t n = wcslen(s);
-    while (n && (s[n - 1] == L'.' || s[n - 1] == L' ')) s[--n] = 0;
-    if (IsReservedDeviceName(s)) {
-        size_t copy = n < cch - 1 ? n : cch - 2;
-        memmove(s + 1, s, copy * sizeof(wchar_t));
-        s[0] = L'_';
-        s[copy + 1] = 0;
-    }
-}
-
 static BOOL IsNA(const wchar_t *s) {
     return !s || !*s || !_wcsicmp(s, L"NA") || !_wcsicmp(s, L"None") || !_wcsicmp(s, L"null");
 }
 
 static void BuildCleanFilename(const Job *job, wchar_t *out, size_t cch) {
-    wchar_t base[1024];
-    base[0] = 0;
-
-    if (InterlockedCompareExchange((LONG *)&g_opt_clean, 0, 0)) {
-        if (!IsNA(job->artist) && !IsNA(job->track)) {
-            StringCchPrintfW(base, 1024, L"%s - %s", job->artist, job->track);
-        } else {
-            const wchar_t *open = wcschr(job->raw_title, L'「');
-            const wchar_t *close = open ? wcschr(open + 1, L'」') : NULL;
-            if (open && close && close > open + 1) {
-                wchar_t left[512];
-                wchar_t middle[512];
-                size_t l = (size_t)(open - job->raw_title);
-                if (l >= 511) l = 511;
-                wcsncpy(left, job->raw_title, l);
-                left[l] = 0;
-                size_t m = (size_t)(close - open - 1);
-                if (m >= 511) m = 511;
-                wcsncpy(middle, open + 1, m);
-                middle[m] = 0;
-                TrimInPlace(left);
-                TrimInPlace(middle);
-                while (*left && (left[wcslen(left) - 1] == L'-' || left[wcslen(left) - 1] == L'–' || left[wcslen(left) - 1] == L'—')) {
-                    left[wcslen(left) - 1] = 0;
-                    TrimInPlace(left);
-                }
-                if (*left && *middle) StringCchPrintfW(base, 1024, L"%s - %s", left, middle);
-            }
-            if (!*base) StringCchCopyW(base, 1024, job->raw_title);
-        }
-
-        static const wchar_t *phrases[] = {
-            L"Official Music Video", L"Official Video", L"Official Audio",
-            L"Official M/V", L"Official MV", L"Music Video", L"Lyric Video"
-        };
-        for (size_t i = 0; i < sizeof(phrases) / sizeof(phrases[0]); ++i) RemovePhraseCI(base, phrases[i]);
-        RemoveNoiseBrackets(base, L'(', L')');
-        RemoveNoiseBrackets(base, L'[', L']');
-        RemoveNoiseBrackets(base, L'【', L'】');
-    } else {
-        StringCchCopyW(base, 1024, job->raw_title);
-    }
-
-    for (size_t i = 0; base[i]; ++i) {
-        if (base[i] == L'–' || base[i] == L'—') base[i] = L'-';
-    }
-    CollapseSpaces(base);
-    while (*base && (base[wcslen(base) - 1] == L'-' || base[wcslen(base) - 1] == L'_' || base[wcslen(base) - 1] == L' ')) {
-        base[wcslen(base) - 1] = 0;
-        TrimInPlace(base);
-    }
-    if (!*base) StringCchCopyW(base, 1024, L"untitled");
-
-    if (InterlockedCompareExchange((LONG *)&g_opt_sanitize, 0, 0)) SanitizeFilename(base, 1024);
-    if (wcslen(base) > 180) base[180] = 0;
-    StringCchPrintfW(out, cch, L"%s.mp3", base);
+    BOOL clean = InterlockedCompareExchange((LONG *)&g_opt_clean, 0, 0) ? TRUE : FALSE;
+    BOOL sanitize = InterlockedCompareExchange((LONG *)&g_opt_sanitize, 0, 0) ? TRUE : FALSE;
+    Filename_BuildClean(job->raw_title, job->artist, job->track, clean, sanitize, out, cch);
 }
 
 static const wchar_t *StatusText(JobStatus status) {
     switch (status) {
-        case JOB_FETCHING: return L"정보 조회";
+        case JOB_FETCHING: return L"정보 조회 중";
         case JOB_READY: return L"대기";
         case JOB_DOWNLOADING: return L"다운로드";
         case JOB_DONE: return L"완료";
@@ -688,11 +484,16 @@ static void UpdateListRow(int index) {
     job = g_jobs[index];
     LeaveCriticalSection(&g_jobs_lock);
 
-    wchar_t no[32], size[64], prog[32];
+    wchar_t no[32], size[64], state[64];
     StringCchPrintfW(no, 32, L"%d", index + 1);
     if (InterlockedCompareExchange((LONG *)&g_opt_size, 0, 0)) FormatBytes(job.expected_size, size, 64);
     else StringCchCopyW(size, 64, L"-");
-    StringCchPrintfW(prog, 32, L"%d%%", job.progress);
+    if (job.status == JOB_DOWNLOADING) {
+        if (job.progress >= 100) StringCchCopyW(state, 64, L"MP3 변환 중");
+        else StringCchPrintfW(state, 64, L"다운로드 %d%%", job.progress);
+    } else {
+        StringCchCopyW(state, 64, StatusText(job.status));
+    }
 
     LVITEMW item = {0};
     item.mask = LVIF_TEXT | LVIF_PARAM;
@@ -706,8 +507,7 @@ static void UpdateListRow(int index) {
     ListView_SetItemText(g_list, index, 1, job.raw_title[0] ? job.raw_title : L"(조회 중)");
     ListView_SetItemText(g_list, index, 2, job.clean_name[0] ? job.clean_name : L"-");
     ListView_SetItemText(g_list, index, 3, size);
-    ListView_SetItemText(g_list, index, 4, (LPWSTR)StatusText(job.status));
-    ListView_SetItemText(g_list, index, 5, prog);
+    ListView_SetItemText(g_list, index, 4, state);
 }
 
 static void RebuildList(void) {
@@ -884,7 +684,6 @@ static int SplitMeta(wchar_t *text, wchar_t **fields, int max_fields) {
 }
 
 static BOOL FetchMetadataForJob(int index) {
-    RefreshTools();
     if (!g_ytdlp[0]) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
@@ -919,7 +718,7 @@ static BOOL FetchMetadataForJob(int index) {
         L"--skip-download", L"--quiet", L"--no-warnings", L"--print", print_template,
         L"--", url
     };
-    if (!BuildCommandLine(command, 8192, arguments, sizeof(arguments) / sizeof(arguments[0]))) {
+    if (!CommandLine_Build(command, 8192, arguments, sizeof(arguments) / sizeof(arguments[0]))) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
         StringCchCopyW(g_jobs[index].error, 768, L"메타데이터 명령이 너무 깁니다.");
@@ -998,13 +797,33 @@ static void CompactDuplicates(void) {
     LeaveCriticalSection(&g_jobs_lock);
 }
 
+static unsigned __stdcall MetadataWorker(void *param) {
+    MetaWork *work = (MetaWork *)param;
+    for (;;) {
+        int index = (int)InterlockedIncrement(&work->next) - 1;
+        if (index >= work->end) break;
+        FetchMetadataForJob(index);
+    }
+    return 0;
+}
+
 static unsigned __stdcall MetadataThread(void *param) {
     MetaBatch *batch = (MetaBatch *)param;
-    int start = batch->start;
-    int end = batch->end;
+    MetaWork work;
+    work.next = batch->start;
+    work.end = batch->end;
     free(batch);
 
-    for (int i = start; i < end; ++i) FetchMetadataForJob(i);
+    HANDLE workers[META_WORKER_COUNT - 1];
+    DWORD worker_count = 0;
+    for (int i = 0; i < META_WORKER_COUNT - 1; ++i) {
+        uintptr_t thread = _beginthreadex(NULL, 0, MetadataWorker, &work, 0, NULL);
+        if (thread) workers[worker_count++] = (HANDLE)thread;
+    }
+    MetadataWorker(&work);
+    if (worker_count) WaitForMultipleObjects(worker_count, workers, TRUE, INFINITE);
+    for (DWORD i = 0; i < worker_count; ++i) CloseHandle(workers[i]);
+
     if (InterlockedCompareExchange((LONG *)&g_opt_dedup, 0, 0)) CompactDuplicates();
     InterlockedExchange((LONG *)&g_meta_running, 0);
     PostMessageW(g_main, WM_APP_REBUILD_LIST, 0, 0);
@@ -1028,6 +847,7 @@ static BOOL UrlAlreadyQueued(const wchar_t *url) {
 static void StartMetadataBatch(int start, int end) {
     if (start >= end) return;
     if (InterlockedCompareExchange((LONG *)&g_meta_running, 1, 0) != 0) return;
+    RefreshTools();
     MetaBatch *batch = (MetaBatch *)malloc(sizeof(MetaBatch));
     if (!batch) {
         InterlockedExchange((LONG *)&g_meta_running, 0);
@@ -1061,7 +881,7 @@ static void AddUrlsFromEdit(void) {
     wchar_t *line = wcstok_s(text, L"\r\n", &ctx);
     while (line && g_job_count < MAX_JOBS) {
         TrimInPlace(line);
-        if (IsHttpUrl(line) && !wcschr(line, L'\"')) {
+        if (Filename_IsHttpUrl(line) && !wcschr(line, L'\"')) {
             BOOL dedup = InterlockedCompareExchange((LONG *)&g_opt_dedup, 0, 0) ? TRUE : FALSE;
             if (!dedup || !UrlAlreadyQueued(line)) {
                 EnterCriticalSection(&g_jobs_lock);
@@ -1200,37 +1020,91 @@ static void HistoryPath(const wchar_t *folder, wchar_t *out, size_t cch) {
     StringCchPrintfW(out, cch, L"%s\\download_history.txt", folder);
 }
 
-static BOOL HistoryContains(const wchar_t *folder, const wchar_t *id) {
+static unsigned HistoryHash(const wchar_t *id) {
+    unsigned hash = 2166136261u;
+    for (size_t i = 0; id[i]; ++i) {
+        hash ^= (unsigned)towlower(id[i]);
+        hash *= 16777619u;
+    }
+    return hash % (unsigned)(sizeof(g_history) / sizeof(g_history[0]));
+}
+
+static BOOL HistoryContainsUnlocked(const wchar_t *id) {
+    unsigned bucket = HistoryHash(id);
+    for (HistoryNode *node = g_history[bucket]; node; node = node->next) {
+        if (!_wcsicmp(node->id, id)) return TRUE;
+    }
+    return FALSE;
+}
+
+static void HistoryInsertUnlocked(const wchar_t *id) {
+    if (!id[0] || HistoryContainsUnlocked(id)) return;
+    HistoryNode *node = (HistoryNode *)calloc(1, sizeof(HistoryNode));
+    if (!node) return;
+    StringCchCopyW(node->id, 128, id);
+    unsigned bucket = HistoryHash(id);
+    node->next = g_history[bucket];
+    g_history[bucket] = node;
+}
+
+static void HistoryClearUnlocked(void) {
+    for (size_t i = 0; i < sizeof(g_history) / sizeof(g_history[0]); ++i) {
+        HistoryNode *node = g_history[i];
+        while (node) {
+            HistoryNode *next = node->next;
+            free(node);
+            node = next;
+        }
+        g_history[i] = NULL;
+    }
+}
+
+static void HistoryLoad(const wchar_t *folder) {
     wchar_t path[MAX_PATH];
     HistoryPath(folder, path, MAX_PATH);
     FILE *f = _wfopen(path, L"rb");
-    if (!f) return FALSE;
-    char id8[256];
-    WideCharToMultiByte(CP_UTF8, 0, id, -1, id8, sizeof(id8), NULL, NULL);
+    EnterCriticalSection(&g_history_lock);
+    HistoryClearUnlocked();
+    if (!f) {
+        LeaveCriticalSection(&g_history_lock);
+        return;
+    }
     char line[512];
-    BOOL found = FALSE;
     while (fgets(line, sizeof(line), f)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\r' || line[n - 1] == '\n')) line[--n] = 0;
-        if (!_stricmp(line, id8)) {
-            found = TRUE;
-            break;
-        }
+        wchar_t id[128];
+        if (MultiByteToWideChar(CP_UTF8, 0, line, -1, id, 128)) HistoryInsertUnlocked(id);
     }
     fclose(f);
+    LeaveCriticalSection(&g_history_lock);
+}
+
+static BOOL HistoryContains(const wchar_t *id) {
+    EnterCriticalSection(&g_history_lock);
+    BOOL found = HistoryContainsUnlocked(id);
+    LeaveCriticalSection(&g_history_lock);
     return found;
 }
 
 static void HistoryAppend(const wchar_t *folder, const wchar_t *id) {
-    if (!id[0] || HistoryContains(folder, id)) return;
+    if (!id[0]) return;
+    EnterCriticalSection(&g_history_lock);
+    if (HistoryContainsUnlocked(id)) {
+        LeaveCriticalSection(&g_history_lock);
+        return;
+    }
     wchar_t path[MAX_PATH];
     HistoryPath(folder, path, MAX_PATH);
     FILE *f = _wfopen(path, L"ab");
-    if (!f) return;
-    char id8[256];
-    WideCharToMultiByte(CP_UTF8, 0, id, -1, id8, sizeof(id8), NULL, NULL);
-    fprintf(f, "%s\r\n", id8);
-    fclose(f);
+    if (f) {
+        char id8[256];
+        WideCharToMultiByte(CP_UTF8, 0, id, -1, id8, sizeof(id8), NULL, NULL);
+        fprintf(f, "%s\r\n", id8);
+        fclose(f);
+        HistoryInsertUnlocked(id);
+    }
+    LeaveCriticalSection(&g_history_lock);
 }
 
 static BOOL MakeUniqueDestination(const wchar_t *folder, const wchar_t *filename, wchar_t *out, size_t cch) {
@@ -1259,7 +1133,6 @@ static void DownloadLineCallbackFn(const char *line, void *ctx) {
         if (d->index >= 0 && d->index < g_job_count) g_jobs[d->index].progress = (int)(v + 0.5);
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, d->index, 0);
-        PostMessageW(g_main, WM_APP_CURRENT_PROGRESS, (WPARAM)(int)(v + 0.5), 0);
     } else if (*line) {
         wchar_t wline[1024];
         Utf8ToWide(line, wline, 1024);
@@ -1295,10 +1168,10 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
         LeaveCriticalSection(&g_jobs_lock);
     }
 
-    if (!IsSafeFilename(job.video_id)) {
+    if (!Filename_IsSafe(job.video_id)) {
         return FailDownloadJob(index, L"영상 ID가 안전한 파일명 형식이 아닙니다.");
     }
-    if (!IsSafeFilename(job.clean_name)) {
+    if (!Filename_IsSafe(job.clean_name)) {
         return FailDownloadJob(index,
             L"안전하지 않거나 Windows에서 사용할 수 없는 파일명입니다. 파일명 자동 제거 옵션을 켜 주세요.");
     }
@@ -1308,7 +1181,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
         return FailDownloadJob(index, L"저장 경로가 너무 깁니다. 더 짧은 폴더를 선택해 주세요.");
     }
     BOOL skip = InterlockedCompareExchange((LONG *)&g_opt_skip, 0, 0) ? TRUE : FALSE;
-    if (skip && (HistoryContains(folder, job.video_id) || FileExistsW2(final_path))) {
+    if (skip && (HistoryContains(job.video_id) || FileExistsW2(final_path))) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_SKIPPED;
         g_jobs[index].progress = 100;
@@ -1317,7 +1190,6 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
         return TRUE;
     }
 
-    RefreshTools();
     if (!g_ytdlp[0] || !g_ffmpeg[0]) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
@@ -1333,8 +1205,6 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     g_jobs[index].error[0] = 0;
     LeaveCriticalSection(&g_jobs_lock);
     PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
-    PostMessageW(g_main, WM_APP_CURRENT_JOB, index, 0);
-    PostMessageW(g_main, WM_APP_CURRENT_PROGRESS, 0, 0);
 
     wchar_t output_template[MAX_PATH * 2];
     if (FAILED(StringCchPrintfW(output_template, MAX_PATH * 2,
@@ -1351,7 +1221,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
         L"--progress-template", L"download:PROGRESS:%(progress._percent_str)s",
         L"-o", output_template, L"--", job.url
     };
-    if (!BuildCommandLine(command, 8192, arguments, sizeof(arguments) / sizeof(arguments[0]))) {
+    if (!CommandLine_Build(command, 8192, arguments, sizeof(arguments) / sizeof(arguments[0]))) {
         return FailDownloadJob(index, L"다운로드 명령이 너무 깁니다.");
     }
 
@@ -1383,19 +1253,22 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     }
 
     wchar_t dest[MAX_PATH];
-    if (skip) {
-        StringCchCopyW(dest, MAX_PATH, final_path);
-    } else if (!MakeUniqueDestination(folder, job.clean_name, dest, MAX_PATH)) {
+    EnterCriticalSection(&g_file_lock);
+    BOOL destination_ok = MakeUniqueDestination(folder, job.clean_name, dest, MAX_PATH);
+    BOOL moved = destination_ok;
+    if (moved && _wcsicmp(temp_mp3, dest)) {
+        moved = MoveFileExW(temp_mp3, dest, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+    }
+    DWORD move_error = moved ? ERROR_SUCCESS : GetLastError();
+    LeaveCriticalSection(&g_file_lock);
+    if (!destination_ok) {
         return FailDownloadJob(index,
             L"저장 파일명을 만들지 못했습니다. 경로 길이와 같은 이름의 파일 수를 확인해 주세요.");
     }
-
-    BOOL moved = TRUE;
-    if (_wcsicmp(temp_mp3, dest)) moved = MoveFileExW(temp_mp3, dest, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
     if (!moved) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchPrintfW(g_jobs[index].error, 768, L"파일 이름 변경에 실패했습니다. 오류 코드: %lu", GetLastError());
+        StringCchPrintfW(g_jobs[index].error, 768, L"파일 이름 변경에 실패했습니다. 오류 코드: %lu", move_error);
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1407,33 +1280,44 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     g_jobs[index].progress = 100;
     LeaveCriticalSection(&g_jobs_lock);
     PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
-    PostMessageW(g_main, WM_APP_FOLDER_STATS, 0, 0);
     return TRUE;
+}
+
+static unsigned __stdcall DownloadWorker(void *param) {
+    DownloadWork *work = (DownloadWork *)param;
+    for (;;) {
+        int slot = (int)InterlockedIncrement(&work->next) - 1;
+        if (slot >= work->total) break;
+        DownloadOne(work->indices[slot], work->folder);
+        int done = (int)InterlockedIncrement(&work->done);
+        PostMessageW(g_main, WM_APP_OVERALL, done, work->total);
+    }
+    return 0;
 }
 
 static unsigned __stdcall DownloadThread(void *param) {
     DownloadBatch *batch = (DownloadBatch *)param;
     BOOL failed_only = batch->failed_only;
-    wchar_t folder[MAX_PATH];
-    StringCchCopyW(folder, MAX_PATH, batch->folder);
+    DownloadWork work;
+    ZeroMemory(&work, sizeof(work));
+    StringCchCopyW(work.folder, MAX_PATH, batch->folder);
     free(batch);
 
-    int indices[MAX_JOBS];
-    int total = 0;
     EnterCriticalSection(&g_jobs_lock);
     for (int i = 0; i < g_job_count; ++i) {
         JobStatus s = g_jobs[i].status;
         BOOL pick = failed_only ? (s == JOB_FAILED) : (s == JOB_READY || s == JOB_FAILED || s == JOB_SKIPPED);
-        if (pick) indices[total++] = i;
+        if (pick) work.indices[work.total++] = i;
     }
     LeaveCriticalSection(&g_jobs_lock);
 
-    PostMessageW(g_main, WM_APP_OVERALL, 0, total);
-    int done = 0;
-    for (int k = 0; k < total; ++k) {
-        DownloadOne(indices[k], folder);
-        done++;
-        PostMessageW(g_main, WM_APP_OVERALL, done, total);
+    PostMessageW(g_main, WM_APP_OVERALL, 0, work.total);
+    HANDLE worker = NULL;
+    if (work.total > 1) worker = (HANDLE)_beginthreadex(NULL, 0, DownloadWorker, &work, 0, NULL);
+    DownloadWorker(&work);
+    if (worker) {
+        WaitForSingleObject(worker, INFINITE);
+        CloseHandle(worker);
     }
 
     InterlockedExchange((LONG *)&g_download_running, 0);
@@ -1470,6 +1354,7 @@ static void StartDownload(BOOL failed_only) {
             APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
+    HistoryLoad(folder);
 
     DownloadBatch *batch = (DownloadBatch *)malloc(sizeof(DownloadBatch));
     if (!batch) {
@@ -1499,10 +1384,10 @@ static HWND AddCtl(DWORD ex, const wchar_t *cls, const wchar_t *text, DWORD styl
 
 static void InitListColumns(void) {
     struct Col { const wchar_t *name; int width; } cols[] = {
-        { L"번호", 48 }, { L"제목", 250 }, { L"예상 이름", 290 },
-        { L"예상 용량", 90 }, { L"상태", 80 }, { L"진행률", 70 }
+        { L"번호", 45 }, { L"제목", 205 }, { L"예상 이름", 245 },
+        { L"예상 용량", 80 }, { L"상태", 100 }
     };
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 5; ++i) {
         LVCOLUMNW c;
         ZeroMemory(&c, sizeof(c));
         c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -1527,88 +1412,121 @@ static void SetDefaultFolder(void) {
     UpdateFolderStatsUI();
 }
 
-static void CreateUi(HWND hwnd) {
-    g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                         DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"MS Shell Dlg");
+static HMENU CreateAppMenu(void) {
+    HMENU bar = CreateMenu();
+    HMENU file = CreatePopupMenu();
+    HMENU job = CreatePopupMenu();
+    HMENU tools = CreatePopupMenu();
+    HMENU help = CreatePopupMenu();
+    if (!bar || !file || !job || !tools || !help) return bar;
 
-    HWND grp1 = AddCtl(0, L"BUTTON", L"1. 유튜브 링크 목록", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                       10, 10, 790, 210, 0, hwnd);
-    (void)grp1;
+    AppendMenuW(file, MF_STRING, IDM_FILE_LOAD_TXT, L"텍스트 파일 불러오기...");
+    AppendMenuW(file, MF_STRING, IDM_FILE_BROWSE_FOLDER, L"저장 폴더 변경...");
+    AppendMenuW(file, MF_STRING, IDM_FILE_OPEN_FOLDER, L"저장 폴더 열기");
+    AppendMenuW(file, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(file, MF_STRING, IDM_FILE_EXIT, L"끝내기");
+
+    AppendMenuW(job, MF_STRING, IDM_JOB_ADD_LINKS, L"링크 추가 및 조회");
+    AppendMenuW(job, MF_STRING, IDM_JOB_REMOVE_DUP, L"중복 항목 제거");
+    AppendMenuW(job, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(job, MF_STRING, IDM_JOB_DOWNLOAD_ALL, L"전체 다운로드 시작");
+    AppendMenuW(job, MF_STRING, IDM_JOB_RETRY_FAILED, L"실패 항목 재시도");
+    AppendMenuW(job, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(job, MF_STRING, IDM_JOB_CLEAR, L"대기 목록 비우기");
+
+    AppendMenuW(tools, MF_STRING, IDM_TOOLS_REFRESH_STATS, L"폴더 정보 새로 고침");
+    AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
+    AppendMenuW(help, MF_STRING, IDM_HELP_ABOUT, L"프로그램 정보");
+
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"파일(&F)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)job, L"작업(&A)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)tools, L"도구(&T)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"도움말(&H)");
+    return bar;
+}
+
+static void CreateUi(HWND hwnd) {
+    g_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                         HANGEUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                         NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
+
+    AddCtl(0, L"BUTTON", L"1. 유튜브 링크", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+           8, 6, 698, 168, 0, hwnd);
     g_url_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                        25, 35, 760, 110, IDC_URL_EDIT, hwnd);
+                        18, 25, 678, 102, IDC_URL_EDIT, hwnd);
     AddCtl(0, L"BUTTON", L"링크 추가", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           25, 155, 200, 42, IDC_ADD_LINKS, hwnd);
-    AddCtl(0, L"BUTTON", L"파일 불러오기(.txt)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           245, 155, 250, 42, IDC_LOAD_TXT, hwnd);
+           18, 136, 112, 27, IDC_ADD_LINKS, hwnd);
+    AddCtl(0, L"BUTTON", L"TXT 불러오기", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+           138, 136, 120, 27, IDC_LOAD_TXT, hwnd);
     AddCtl(0, L"BUTTON", L"중복 제거", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           515, 155, 180, 42, IDC_REMOVE_DUP, hwnd);
+           266, 136, 112, 27, IDC_REMOVE_DUP, hwnd);
 
     AddCtl(0, L"BUTTON", L"2. 다운로드 대기 목록", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           10, 225, 790, 335, 0, hwnd);
+           8, 178, 698, 278, 0, hwnd);
     g_list = AddCtl(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
-                    25, 250, 760, 295, IDC_LIST, hwnd);
+                    18, 198, 678, 246, IDC_LIST, hwnd);
     InitListColumns();
 
     AddCtl(0, L"BUTTON", L"3. 옵션", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           810, 10, 400, 260, 0, hwnd);
+           714, 6, 338, 210, 0, hwnd);
     g_chk_dedup = AddCtl(0, L"BUTTON", L"중복 링크 자동 제거", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                         830, 40, 340, 28, IDC_CHK_DEDUP, hwnd);
+                         730, 29, 300, 22, IDC_CHK_DEDUP, hwnd);
     g_chk_skip = AddCtl(0, L"BUTTON", L"이미 다운로드한 곡 건너뛰기", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                        830, 80, 350, 28, IDC_CHK_SKIP, hwnd);
+                        730, 63, 300, 22, IDC_CHK_SKIP, hwnd);
     g_chk_sanitize = AddCtl(0, L"BUTTON", L"파일명 금지 문자 자동 제거", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                            830, 120, 350, 28, IDC_CHK_SANITIZE, hwnd);
+                            730, 97, 300, 22, IDC_CHK_SANITIZE, hwnd);
     g_chk_clean = AddCtl(0, L"BUTTON", L"이름 자동 정리 (아티스트 - 곡명)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                         830, 160, 360, 28, IDC_CHK_CLEAN, hwnd);
-    g_chk_size = AddCtl(0, L"BUTTON", L"다운로드 전 예상 파일 용량 표시", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                        830, 200, 360, 28, IDC_CHK_SIZE, hwnd);
+                         730, 131, 300, 22, IDC_CHK_CLEAN, hwnd);
+    g_chk_size = AddCtl(0, L"BUTTON", L"예상 파일 용량 표시", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                        730, 165, 300, 22, IDC_CHK_SIZE, hwnd);
     SendMessageW(g_chk_dedup, BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(g_chk_skip, BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(g_chk_sanitize, BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(g_chk_clean, BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(g_chk_size, BM_SETCHECK, BST_CHECKED, 0);
 
-    AddCtl(0, L"BUTTON", L"4. 저장 폴더 정보", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           810, 280, 400, 280, 0, hwnd);
+    AddCtl(0, L"BUTTON", L"4. 저장 폴더", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+           714, 222, 338, 234, 0, hwnd);
     g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                           830, 310, 265, 32, IDC_FOLDER_EDIT, hwnd);
+                           730, 246, 230, 24, IDC_FOLDER_EDIT, hwnd);
     AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           1105, 308, 85, 36, IDC_FOLDER_BROWSE, hwnd);
+           966, 245, 70, 26, IDC_FOLDER_BROWSE, hwnd);
     g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡\r\n총 용량: -", WS_CHILD | WS_VISIBLE,
-                            830, 370, 330, 65, IDC_FOLDER_STATS, hwnd);
+                            730, 290, 290, 48, IDC_FOLDER_STATS, hwnd);
     AddCtl(0, L"BUTTON", L"폴더 열기", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           1000, 485, 180, 48, IDC_FOLDER_OPEN, hwnd);
+           730, 408, 112, 28, IDC_FOLDER_OPEN, hwnd);
 
-    AddCtl(0, L"BUTTON", L"전체 다운로드 시작", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-           20, 575, 300, 48, IDC_DOWNLOAD_ALL, hwnd);
-    AddCtl(0, L"BUTTON", L"실패 항목만 재시도", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           340, 575, 280, 48, IDC_RETRY_FAILED, hwnd);
+    AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+           12, 466, 190, 34, IDC_DOWNLOAD_ALL, hwnd);
+    AddCtl(0, L"BUTTON", L"실패 항목 재시도", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+           210, 466, 190, 34, IDC_RETRY_FAILED, hwnd);
     AddCtl(0, L"BUTTON", L"선택 삭제", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           640, 575, 250, 48, IDC_DELETE_SELECTED, hwnd);
+           408, 466, 145, 34, IDC_DELETE_SELECTED, hwnd);
     AddCtl(0, L"BUTTON", L"종료", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           910, 575, 280, 48, IDC_EXIT, hwnd);
+           561, 466, 145, 34, IDC_EXIT, hwnd);
 
-    AddCtl(0, L"BUTTON", L"현재 작업", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           10, 635, 1200, 75, 0, hwnd);
-    g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                        145, 655, 710, 24, IDC_PROGRESS, hwnd);
+    AddCtl(0, L"BUTTON", L"전체 작업", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+           8, 510, 1044, 70, 0, hwnd);
+    g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
+                        86, 535, 690, 20, IDC_PROGRESS, hwnd);
     SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-    g_status = AddCtl(0, L"STATIC", L"상태: 대기 중", WS_CHILD | WS_VISIBLE,
-                      25, 680, 830, 22, IDC_STATUS, hwnd);
-    g_overall = AddCtl(0, L"STATIC", L"전체 진행률: 0 / 0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                       870, 655, 315, 30, IDC_OVERALL, hwnd);
+    SendMessageW(g_progress, PBM_SETSTEP, 10, 0);
+    g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                       790, 535, 120, 22, IDC_OVERALL, hwnd);
 
     AddCtl(0, L"BUTTON", L"파일명 미리보기", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           10, 720, 1200, 90, 0, hwnd);
-    AddCtl(0, L"STATIC", L"원본 제목:", WS_CHILD | WS_VISIBLE,
-           25, 748, 110, 22, 0, hwnd);
+           8, 586, 1044, 82, 0, hwnd);
+    AddCtl(0, L"STATIC", L"원본:", WS_CHILD | WS_VISIBLE,
+           20, 610, 58, 20, 0, hwnd);
     g_raw_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                         145, 742, 1040, 28, IDC_RAW_TITLE, hwnd);
-    AddCtl(0, L"STATIC", L"정리된 이름:", WS_CHILD | WS_VISIBLE,
-           25, 780, 110, 22, 0, hwnd);
+                         82, 606, 954, 23, IDC_RAW_TITLE, hwnd);
+    AddCtl(0, L"STATIC", L"정리:", WS_CHILD | WS_VISIBLE,
+           20, 639, 58, 20, 0, hwnd);
     g_clean_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                           145, 774, 1040, 28, IDC_CLEAN_TITLE, hwnd);
+                           82, 635, 954, 23, IDC_CLEAN_TITLE, hwnd);
 
+    g_status = AddCtl(0, STATUSCLASSNAMEW, L"준비 완료", WS_CHILD | WS_VISIBLE,
+                      0, 0, 0, 0, IDC_STATUS, hwnd);
     SetDefaultFolder();
 }
 
@@ -1624,10 +1542,34 @@ static void UpdateOptionFromControl(int id) {
     }
 }
 
+static void ClearJobs(void) {
+    if (InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) return;
+    if (g_job_count && MessageBoxW(g_main, L"대기 목록을 모두 비우시겠습니까?", APP_TITLE,
+                                  MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    EnterCriticalSection(&g_jobs_lock);
+    ZeroMemory(g_jobs, sizeof(g_jobs));
+    g_job_count = 0;
+    LeaveCriticalSection(&g_jobs_lock);
+    RebuildList();
+    UpdatePreviewFromSelection();
+}
+
+static void OpenHistoryFile(void) {
+    wchar_t folder[MAX_PATH], path[MAX_PATH];
+    GetWindowTextW(g_folder_edit, folder, MAX_PATH);
+    if (!DirectoryExistsW2(folder)) SHCreateDirectoryExW(g_main, folder, NULL);
+    HistoryPath(folder, path, MAX_PATH);
+    FILE *f = _wfopen(path, L"ab");
+    if (f) fclose(f);
+    ShellExecuteW(g_main, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
             g_main = hwnd;
+            SetMenu(hwnd, CreateAppMenu());
             CreateUi(hwnd);
             RefreshTools();
             if (!g_ytdlp[0]) SetControlText(g_status, L"상태: yt-dlp.exe 필요");
@@ -1637,19 +1579,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int id = LOWORD(wParam);
             switch (id) {
                 case IDC_ADD_LINKS: AddUrlsFromEdit(); break;
+                case IDM_JOB_ADD_LINKS: AddUrlsFromEdit(); break;
                 case IDC_LOAD_TXT: LoadTxtFile(); break;
+                case IDM_FILE_LOAD_TXT: LoadTxtFile(); break;
                 case IDC_REMOVE_DUP:
+                case IDM_JOB_REMOVE_DUP:
                     if (!g_meta_running && !g_download_running) {
                         CompactDuplicates();
                         RebuildList();
                     }
                     break;
                 case IDC_FOLDER_BROWSE: BrowseFolder(); break;
+                case IDM_FILE_BROWSE_FOLDER: BrowseFolder(); break;
                 case IDC_FOLDER_OPEN: OpenFolder(); break;
+                case IDM_FILE_OPEN_FOLDER: OpenFolder(); break;
                 case IDC_DOWNLOAD_ALL: StartDownload(FALSE); break;
+                case IDM_JOB_DOWNLOAD_ALL: StartDownload(FALSE); break;
                 case IDC_RETRY_FAILED: StartDownload(TRUE); break;
+                case IDM_JOB_RETRY_FAILED: StartDownload(TRUE); break;
                 case IDC_DELETE_SELECTED: DeleteSelected(); break;
+                case IDM_JOB_CLEAR: ClearJobs(); break;
+                case IDM_TOOLS_REFRESH_STATS: UpdateFolderStatsUI(); break;
+                case IDM_TOOLS_OPEN_HISTORY: OpenHistoryFile(); break;
+                case IDM_HELP_ABOUT:
+                    MessageBoxW(hwnd,
+                        L"Seowol YT MP3 Downloader 1.0.3\r\n\r\nWindows 클래식 스타일의 가벼운 MP3 다운로드 도구",
+                        APP_TITLE, MB_OK | MB_ICONINFORMATION);
+                    break;
                 case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+                case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
                 case IDC_CHK_DEDUP:
                 case IDC_CHK_SKIP:
                 case IDC_CHK_SANITIZE:
@@ -1691,32 +1649,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        case WM_APP_CURRENT_JOB: {
-            int index = (int)wParam;
-            Job j;
-            BOOL found = FALSE;
-            EnterCriticalSection(&g_jobs_lock);
-            if (index >= 0 && index < g_job_count) {
-                j = g_jobs[index];
-                found = TRUE;
-            }
-            LeaveCriticalSection(&g_jobs_lock);
-            if (found) {
-                wchar_t text[1200];
-                StringCchPrintfW(text, 1200, L"상태: %s 다운로드 중", j.clean_name[0] ? j.clean_name : j.raw_title);
-                SetControlText(g_status, text);
-            }
-            return 0;
-        }
-
-        case WM_APP_CURRENT_PROGRESS:
-            SendMessageW(g_progress, PBM_SETPOS, (int)wParam, 0);
-            return 0;
-
         case WM_APP_OVERALL: {
             wchar_t text[128];
-            StringCchPrintfW(text, 128, L"전체 진행률: %d / %d", (int)wParam, (int)lParam);
+            int done = (int)wParam;
+            int total = (int)lParam;
+            StringCchPrintfW(text, 128, L"%d / %d", done, total);
             SetControlText(g_overall, text);
+            SendMessageW(g_progress, PBM_SETPOS, total > 0 ? done * 100 / total : 0, 0);
             return 0;
         }
 
@@ -1743,6 +1682,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             UpdateFolderStatsUI();
             return 0;
 
+        case WM_SIZE:
+            if (g_status) SendMessageW(g_status, WM_SIZE, 0, 0);
+            return 0;
+
         case WM_CLOSE:
             if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
                 InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0)) {
@@ -1765,7 +1708,7 @@ static BOOL RunCoreSelfTests(void) {
         L"tool.exe", L"plain", L"with space", L"C:\\trailing\\", L"quote\"inside", L""
     };
     wchar_t command[512];
-    if (!BuildCommandLine(command, 512, arguments, sizeof(arguments) / sizeof(arguments[0]))) return FALSE;
+    if (!CommandLine_Build(command, 512, arguments, sizeof(arguments) / sizeof(arguments[0]))) return FALSE;
 
     int parsed_count = 0;
     LPWSTR *parsed = CommandLineToArgvW(command, &parsed_count);
@@ -1778,18 +1721,24 @@ static BOOL RunCoreSelfTests(void) {
     if (!ok) return FALSE;
 
     wchar_t escaped[64];
-    if (!EscapePowerShellSingleQuoted(L"C:\\O'Brien", escaped, 64) ||
+    if (!PowerShell_EscapeSingleQuoted(L"C:\\O'Brien", escaped, 64) ||
         wcscmp(escaped, L"C:\\O''Brien")) return FALSE;
 
     wchar_t filename[128];
     StringCchCopyW(filename, 128, L"..\\bad:name?. ");
-    SanitizeFilename(filename, 128);
-    if (!IsSafeFilename(filename) || IsSafeFilename(L"..\\escape.mp3") ||
-        IsSafeFilename(L"CON.mp3") || IsSafeFilename(L"CON .mp3") ||
-        IsSafeFilename(L"song.mp3:stream")) return FALSE;
+    Filename_Sanitize(filename, 128);
+    if (!Filename_IsSafe(filename) || Filename_IsSafe(L"..\\escape.mp3") ||
+        Filename_IsSafe(L"CON.mp3") || Filename_IsSafe(L"CON .mp3") ||
+        Filename_IsSafe(L"song.mp3:stream")) return FALSE;
 
-    if (!IsHttpUrl(L"HTTPS://www.youtube.com/watch?v=test") ||
-        IsHttpUrl(L"ftp://example.com/file")) return FALSE;
+    if (!Filename_IsHttpUrl(L"HTTPS://www.youtube.com/watch?v=test") ||
+        Filename_IsHttpUrl(L"ftp://example.com/file")) return FALSE;
+
+    wchar_t cleaned[256];
+    Filename_BuildClean(L"가수 - 노래 (공식 뮤비)", L"", L"", TRUE, TRUE, cleaned, 256);
+    if (wcscmp(cleaned, L"가수 - 노래.mp3")) return FALSE;
+    Filename_BuildClean(L"가수 - 노래 (Live)", L"", L"", TRUE, TRUE, cleaned, 256);
+    if (wcscmp(cleaned, L"가수 - 노래 (Live).mp3")) return FALSE;
     return TRUE;
 }
 
@@ -1799,6 +1748,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     SetProcessDPIAware();
     HRESULT co_init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitializeCriticalSection(&g_jobs_lock);
+    InitializeCriticalSection(&g_file_lock);
+    InitializeCriticalSection(&g_history_lock);
     int result = 1;
     GetAppDirectory(g_app_dir, MAX_PATH);
 
@@ -1818,7 +1769,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXW wc;
@@ -1835,7 +1786,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     RECT r = {0, 0, APP_CLIENT_W, APP_CLIENT_H};
-    AdjustWindowRect(&r, style, FALSE);
+    AdjustWindowRect(&r, style, TRUE);
     int width = r.right - r.left;
     int height = r.bottom - r.top;
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
@@ -1864,6 +1815,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     }
 
 cleanup:
+    EnterCriticalSection(&g_history_lock);
+    HistoryClearUnlocked();
+    LeaveCriticalSection(&g_history_lock);
+    DeleteCriticalSection(&g_history_lock);
+    DeleteCriticalSection(&g_file_lock);
     DeleteCriticalSection(&g_jobs_lock);
     if (SUCCEEDED(co_init)) CoUninitialize();
     return result;
