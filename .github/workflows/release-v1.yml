@@ -69,23 +69,7 @@ jobs:
 
       - name: Download bundled tools
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force payload | Out-Null
-          Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'payload/yt-dlp.exe'
-          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'ffmpeg.zip'
-          Expand-Archive -LiteralPath 'ffmpeg.zip' -DestinationPath 'ffmpeg-dist' -Force
-          $ffmpeg = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
-          $ffprobe = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffprobe.exe' | Select-Object -First 1
-          if (-not $ffmpeg -or -not $ffprobe) { throw 'FFmpeg binaries were not found.' }
-          Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
-          Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
-          @(
-            'Bundled components:',
-            '- yt-dlp: https://github.com/yt-dlp/yt-dlp',
-            '- FFmpeg: https://ffmpeg.org/',
-            '- Windows FFmpeg build: https://www.gyan.dev/ffmpeg/builds/',
-            'See the upstream projects for their respective licenses and source code.'
-          ) | Set-Content -Encoding UTF8 'payload/THIRD_PARTY_NOTICES.txt'
+        run: ./.github/scripts/prepare-payload.ps1
 
       - name: Build single-file EXE
         shell: pwsh

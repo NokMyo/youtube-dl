@@ -20,6 +20,8 @@
 
 #include "command_line.h"
 #include "filename.h"
+#include "resource.h"
+#include "version.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -65,6 +67,7 @@
 #define WM_APP_OVERALL          (WM_APP + 6)
 #define WM_APP_DOWNLOAD_DONE    (WM_APP + 7)
 #define WM_APP_FOLDER_STATS     (WM_APP + 8)
+#define WM_APP_TOOLS_READY      (WM_APP + 9)
 
 #define IDM_FILE_LOAD_TXT       2001
 #define IDM_FILE_BROWSE_FOLDER  2002
@@ -129,6 +132,13 @@ typedef struct HistoryNode {
     struct HistoryNode *next;
 } HistoryNode;
 
+typedef struct FolderStatsResult {
+    LONG generation;
+    wchar_t folder[MAX_PATH];
+    int count;
+    ULONGLONG bytes;
+} FolderStatsResult;
+
 typedef struct MetadataLines {
     wchar_t meta[4096];
     wchar_t last[1024];
@@ -136,6 +146,7 @@ typedef struct MetadataLines {
 
 typedef struct DownloadLines {
     int index;
+    int last_progress;
     wchar_t last[1024];
 } DownloadLines;
 
@@ -162,9 +173,12 @@ static int g_job_count = 0;
 static CRITICAL_SECTION g_jobs_lock;
 static CRITICAL_SECTION g_file_lock;
 static CRITICAL_SECTION g_history_lock;
+static CRITICAL_SECTION g_tools_lock;
 static HistoryNode *g_history[1024];
 static volatile LONG g_meta_running = 0;
 static volatile LONG g_download_running = 0;
+static volatile LONG g_tools_loading = 0;
+static volatile LONG g_stats_generation = 0;
 static volatile LONG g_opt_dedup = 1;
 static volatile LONG g_opt_skip = 1;
 static volatile LONG g_opt_sanitize = 1;
@@ -176,6 +190,7 @@ static wchar_t g_ytdlp[MAX_PATH];
 static wchar_t g_ffmpeg[MAX_PATH];
 static wchar_t g_ffmpeg_dir[MAX_PATH];
 static wchar_t g_tools_dir[MAX_PATH];
+static wchar_t g_history_folder[MAX_PATH];
 
 static BOOL FileExistsW2(const wchar_t *path) {
     DWORD a = GetFileAttributesW(path);
@@ -278,13 +293,13 @@ static void WriteBundleStamp(ULONGLONG value) {
 }
 
 static BOOL PrepareBundledTools(void) {
-    g_tools_dir[0] = 0;
-
     wchar_t local[MAX_PATH];
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
         return FALSE;
     }
+    EnterCriticalSection(&g_tools_lock);
     StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\SeowolYTMP3Downloader\\tools", local);
+    LeaveCriticalSection(&g_tools_lock);
     SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
 
     wchar_t exe[MAX_PATH];
@@ -410,6 +425,7 @@ static BOOL PrepareBundledTools(void) {
 }
 
 static void RefreshTools(void) {
+    EnterCriticalSection(&g_tools_lock);
     g_ytdlp[0] = 0;
     g_ffmpeg[0] = 0;
     g_ffmpeg_dir[0] = 0;
@@ -417,6 +433,15 @@ static void RefreshTools(void) {
     if (FindTool(L"ffmpeg.exe", g_ffmpeg, MAX_PATH)) {
         DirectoryFromPath(g_ffmpeg, g_ffmpeg_dir, MAX_PATH);
     }
+    LeaveCriticalSection(&g_tools_lock);
+}
+
+static BOOL ToolsAvailable(void) {
+    EnterCriticalSection(&g_tools_lock);
+    BOOL available = g_ytdlp[0] && g_ffmpeg[0] &&
+                     FileExistsW2(g_ytdlp) && FileExistsW2(g_ffmpeg);
+    LeaveCriticalSection(&g_tools_lock);
+    return available;
 }
 
 static void TrimInPlace(wchar_t *s) {
@@ -475,24 +500,31 @@ static void SetControlText(HWND h, const wchar_t *text) {
 }
 
 static void UpdateListRow(int index) {
-    Job job;
+    wchar_t raw_title[1024], clean_name[768];
+    ULONGLONG expected_size;
+    int progress;
+    JobStatus status;
     EnterCriticalSection(&g_jobs_lock);
     if (index < 0 || index >= g_job_count) {
         LeaveCriticalSection(&g_jobs_lock);
         return;
     }
-    job = g_jobs[index];
+    StringCchCopyW(raw_title, 1024, g_jobs[index].raw_title);
+    StringCchCopyW(clean_name, 768, g_jobs[index].clean_name);
+    expected_size = g_jobs[index].expected_size;
+    progress = g_jobs[index].progress;
+    status = g_jobs[index].status;
     LeaveCriticalSection(&g_jobs_lock);
 
     wchar_t no[32], size[64], state[64];
     StringCchPrintfW(no, 32, L"%d", index + 1);
-    if (InterlockedCompareExchange((LONG *)&g_opt_size, 0, 0)) FormatBytes(job.expected_size, size, 64);
+    if (InterlockedCompareExchange((LONG *)&g_opt_size, 0, 0)) FormatBytes(expected_size, size, 64);
     else StringCchCopyW(size, 64, L"-");
-    if (job.status == JOB_DOWNLOADING) {
-        if (job.progress >= 100) StringCchCopyW(state, 64, L"MP3 변환 중");
-        else StringCchPrintfW(state, 64, L"다운로드 %d%%", job.progress);
+    if (status == JOB_DOWNLOADING) {
+        if (progress >= 100) StringCchCopyW(state, 64, L"MP3 변환 중");
+        else StringCchPrintfW(state, 64, L"다운로드 %d%%", progress);
     } else {
-        StringCchCopyW(state, 64, StatusText(job.status));
+        StringCchCopyW(state, 64, StatusText(status));
     }
 
     LVITEMW item = {0};
@@ -504,18 +536,21 @@ static void UpdateListRow(int index) {
     if (index >= ListView_GetItemCount(g_list)) ListView_InsertItem(g_list, &item);
     else ListView_SetItem(g_list, &item);
 
-    ListView_SetItemText(g_list, index, 1, job.raw_title[0] ? job.raw_title : L"(조회 중)");
-    ListView_SetItemText(g_list, index, 2, job.clean_name[0] ? job.clean_name : L"-");
+    ListView_SetItemText(g_list, index, 1, raw_title[0] ? raw_title : L"(조회 중)");
+    ListView_SetItemText(g_list, index, 2, clean_name[0] ? clean_name : L"-");
     ListView_SetItemText(g_list, index, 3, size);
     ListView_SetItemText(g_list, index, 4, state);
 }
 
 static void RebuildList(void) {
+    SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_list);
     EnterCriticalSection(&g_jobs_lock);
     int count = g_job_count;
     LeaveCriticalSection(&g_jobs_lock);
     for (int i = 0; i < count; ++i) UpdateListRow(i);
+    SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_list, NULL, TRUE);
 }
 
 static void UpdatePreviewFromSelection(void) {
@@ -574,16 +609,41 @@ static void GetFolderStats(const wchar_t *folder, int *count, ULONGLONG *bytes) 
     FindClose(h);
 }
 
+static unsigned __stdcall FolderStatsThread(void *param) {
+    FolderStatsResult *result = (FolderStatsResult *)param;
+    GetFolderStats(result->folder, &result->count, &result->bytes);
+    if (!PostMessageW(g_main, WM_APP_FOLDER_STATS, 0, (LPARAM)result)) free(result);
+    return 0;
+}
+
 static void UpdateFolderStatsUI(void) {
+    FolderStatsResult *result = (FolderStatsResult *)calloc(1, sizeof(FolderStatsResult));
+    if (!result) return;
+    GetWindowTextW(g_folder_edit, result->folder, MAX_PATH);
+    result->generation = InterlockedIncrement((LONG *)&g_stats_generation);
+    SetControlText(g_folder_stats, L"폴더 정보 계산 중...");
+    uintptr_t thread = _beginthreadex(NULL, 0, FolderStatsThread, result, 0, NULL);
+    if (thread) {
+        CloseHandle((HANDLE)thread);
+    } else {
+        FolderStatsThread(result);
+    }
+}
+
+static void ApplyFolderStatsResult(FolderStatsResult *result) {
+    if (!result) return;
     wchar_t folder[MAX_PATH];
     GetWindowTextW(g_folder_edit, folder, MAX_PATH);
-    int count = 0;
-    ULONGLONG bytes = 0;
-    GetFolderStats(folder, &count, &bytes);
+    if (result->generation != InterlockedCompareExchange((LONG *)&g_stats_generation, 0, 0) ||
+        _wcsicmp(folder, result->folder)) {
+        free(result);
+        return;
+    }
     wchar_t size[64], text[256];
-    FormatBytes(bytes, size, 64);
-    StringCchPrintfW(text, 256, L"현재 폴더: %d곡\r\n총 용량: %s", count, size);
+    FormatBytes(result->bytes, size, 64);
+    StringCchPrintfW(text, 256, L"현재 폴더: %d곡\r\n총 용량: %s", result->count, size);
     SetControlText(g_folder_stats, text);
+    free(result);
 }
 
 static void Utf8ToWide(const char *src, wchar_t *dst, size_t cch) {
@@ -775,25 +835,22 @@ static BOOL SameUrlOrId(const Job *a, const Job *b) {
 
 static void CompactDuplicates(void) {
     EnterCriticalSection(&g_jobs_lock);
-    Job *temp = (Job *)calloc(MAX_JOBS, sizeof(Job));
-    if (!temp) {
-        LeaveCriticalSection(&g_jobs_lock);
-        return;
-    }
     int out = 0;
     for (int i = 0; i < g_job_count; ++i) {
         BOOL dup = FALSE;
         for (int j = 0; j < out; ++j) {
-            if (SameUrlOrId(&g_jobs[i], &temp[j])) {
+            if (SameUrlOrId(&g_jobs[i], &g_jobs[j])) {
                 dup = TRUE;
                 break;
             }
         }
-        if (!dup) temp[out++] = g_jobs[i];
+        if (!dup) {
+            if (out != i) g_jobs[out] = g_jobs[i];
+            out++;
+        }
     }
-    memcpy(g_jobs, temp, sizeof(Job) * out);
+    if (out < g_job_count) ZeroMemory(&g_jobs[out], sizeof(Job) * (size_t)(g_job_count - out));
     g_job_count = out;
-    free(temp);
     LeaveCriticalSection(&g_jobs_lock);
 }
 
@@ -816,7 +873,9 @@ static unsigned __stdcall MetadataThread(void *param) {
 
     HANDLE workers[META_WORKER_COUNT - 1];
     DWORD worker_count = 0;
-    for (int i = 0; i < META_WORKER_COUNT - 1; ++i) {
+    int job_count = work.end - (int)work.next;
+    int child_count = job_count < META_WORKER_COUNT ? job_count - 1 : META_WORKER_COUNT - 1;
+    for (int i = 0; i < child_count; ++i) {
         uintptr_t thread = _beginthreadex(NULL, 0, MetadataWorker, &work, 0, NULL);
         if (thread) workers[worker_count++] = (HANDLE)thread;
     }
@@ -831,23 +890,16 @@ static unsigned __stdcall MetadataThread(void *param) {
     return 0;
 }
 
-static BOOL UrlAlreadyQueued(const wchar_t *url) {
-    BOOL found = FALSE;
-    EnterCriticalSection(&g_jobs_lock);
+static BOOL UrlAlreadyQueuedUnlocked(const wchar_t *url) {
     for (int i = 0; i < g_job_count; ++i) {
-        if (!_wcsicmp(g_jobs[i].url, url)) {
-            found = TRUE;
-            break;
-        }
+        if (!_wcsicmp(g_jobs[i].url, url)) return TRUE;
     }
-    LeaveCriticalSection(&g_jobs_lock);
-    return found;
+    return FALSE;
 }
 
 static void StartMetadataBatch(int start, int end) {
     if (start >= end) return;
     if (InterlockedCompareExchange((LONG *)&g_meta_running, 1, 0) != 0) return;
-    RefreshTools();
     MetaBatch *batch = (MetaBatch *)malloc(sizeof(MetaBatch));
     if (!batch) {
         InterlockedExchange((LONG *)&g_meta_running, 0);
@@ -864,6 +916,16 @@ static void StartMetadataBatch(int start, int end) {
 }
 
 static void AddUrlsFromEdit(void) {
+    if (InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
+        MessageBoxW(g_main, L"다운로드 구성 요소를 준비하고 있습니다. 잠시만 기다려 주세요.",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!ToolsAvailable()) {
+        MessageBoxW(g_main, L"yt-dlp.exe와 ffmpeg.exe를 찾을 수 없습니다.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
+        return;
+    }
     if (InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
         InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) {
         MessageBoxW(g_main, L"현재 작업이 끝난 뒤 링크를 추가해 주세요.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
@@ -876,28 +938,29 @@ static void AddUrlsFromEdit(void) {
     if (!text) return;
     GetWindowTextW(g_url_edit, text, len + 1);
 
-    int start = g_job_count;
+    BOOL dedup = InterlockedCompareExchange((LONG *)&g_opt_dedup, 0, 0) ? TRUE : FALSE;
     wchar_t *ctx = NULL;
     wchar_t *line = wcstok_s(text, L"\r\n", &ctx);
+    EnterCriticalSection(&g_jobs_lock);
+    int start = g_job_count;
     while (line && g_job_count < MAX_JOBS) {
         TrimInPlace(line);
         if (Filename_IsHttpUrl(line) && !wcschr(line, L'\"')) {
-            BOOL dedup = InterlockedCompareExchange((LONG *)&g_opt_dedup, 0, 0) ? TRUE : FALSE;
-            if (!dedup || !UrlAlreadyQueued(line)) {
-                EnterCriticalSection(&g_jobs_lock);
+            if (!dedup || !UrlAlreadyQueuedUnlocked(line)) {
                 Job *j = &g_jobs[g_job_count++];
                 ZeroMemory(j, sizeof(*j));
                 StringCchCopyW(j->url, 2048, line);
                 j->status = JOB_FETCHING;
-                LeaveCriticalSection(&g_jobs_lock);
             }
         }
         line = wcstok_s(NULL, L"\r\n", &ctx);
     }
+    int end = g_job_count;
+    LeaveCriticalSection(&g_jobs_lock);
     free(text);
     SetWindowTextW(g_url_edit, L"");
     RebuildList();
-    StartMetadataBatch(start, g_job_count);
+    StartMetadataBatch(start, end);
 }
 
 static wchar_t *ReadTextFile(const wchar_t *path) {
@@ -1059,12 +1122,17 @@ static void HistoryClearUnlocked(void) {
     }
 }
 
-static void HistoryLoad(const wchar_t *folder) {
+static void HistoryEnsureLoaded(const wchar_t *folder) {
     wchar_t path[MAX_PATH];
     HistoryPath(folder, path, MAX_PATH);
-    FILE *f = _wfopen(path, L"rb");
     EnterCriticalSection(&g_history_lock);
+    if (!_wcsicmp(g_history_folder, folder)) {
+        LeaveCriticalSection(&g_history_lock);
+        return;
+    }
     HistoryClearUnlocked();
+    StringCchCopyW(g_history_folder, MAX_PATH, folder);
+    FILE *f = _wfopen(path, L"rb");
     if (!f) {
         LeaveCriticalSection(&g_history_lock);
         return;
@@ -1129,8 +1197,11 @@ static void DownloadLineCallbackFn(const char *line, void *ctx) {
         double v = atof(p + 9);
         if (v < 0) v = 0;
         if (v > 100) v = 100;
+        int progress = (int)(v + 0.5);
+        if (progress == d->last_progress) return;
+        d->last_progress = progress;
         EnterCriticalSection(&g_jobs_lock);
-        if (d->index >= 0 && d->index < g_job_count) g_jobs[d->index].progress = (int)(v + 0.5);
+        if (d->index >= 0 && d->index < g_job_count) g_jobs[d->index].progress = progress;
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, d->index, 0);
     } else if (*line) {
@@ -1228,6 +1299,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     DownloadLines lines;
     ZeroMemory(&lines, sizeof(lines));
     lines.index = index;
+    lines.last_progress = -1;
     DWORD code = 1;
     BOOL ran = RunProcessLines(command, DownloadLineCallbackFn, &lines, &code);
     if (!ran || code != 0) {
@@ -1312,20 +1384,29 @@ static unsigned __stdcall DownloadThread(void *param) {
     LeaveCriticalSection(&g_jobs_lock);
 
     PostMessageW(g_main, WM_APP_OVERALL, 0, work.total);
-    HANDLE worker = NULL;
-    if (work.total > 1) worker = (HANDLE)_beginthreadex(NULL, 0, DownloadWorker, &work, 0, NULL);
-    DownloadWorker(&work);
-    if (worker) {
-        WaitForSingleObject(worker, INFINITE);
-        CloseHandle(worker);
+    HANDLE workers[DOWNLOAD_WORKER_COUNT - 1];
+    DWORD worker_count = 0;
+    int active_workers = work.total < DOWNLOAD_WORKER_COUNT ? work.total : DOWNLOAD_WORKER_COUNT;
+    int child_count = active_workers > 0 ? active_workers - 1 : 0;
+    for (int i = 0; i < child_count; ++i) {
+        uintptr_t thread = _beginthreadex(NULL, 0, DownloadWorker, &work, 0, NULL);
+        if (thread) workers[worker_count++] = (HANDLE)thread;
     }
+    DownloadWorker(&work);
+    if (worker_count) WaitForMultipleObjects(worker_count, workers, TRUE, INFINITE);
+    for (DWORD i = 0; i < worker_count; ++i) CloseHandle(workers[i]);
 
     InterlockedExchange((LONG *)&g_download_running, 0);
-    PostMessageW(g_main, WM_APP_DOWNLOAD_DONE, 0, 0);
+    PostMessageW(g_main, WM_APP_DOWNLOAD_DONE, work.total, 0);
     return 0;
 }
 
 static void StartDownload(BOOL failed_only) {
+    if (InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
+        MessageBoxW(g_main, L"다운로드 구성 요소를 준비하고 있습니다. 잠시만 기다려 주세요.",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     if (InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0)) {
         MessageBoxW(g_main, L"링크 정보를 조회 중입니다. 조회가 끝난 뒤 시작해 주세요.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
         return;
@@ -1346,15 +1427,14 @@ static void StartDownload(BOOL failed_only) {
         return;
     }
 
-    RefreshTools();
-    if (!g_ytdlp[0] || !g_ffmpeg[0]) {
+    if (!ToolsAvailable()) {
         InterlockedExchange((LONG *)&g_download_running, 0);
         MessageBoxW(g_main,
             L"yt-dlp.exe와 ffmpeg.exe가 필요합니다.\r\n\r\n프로그램과 같은 폴더에 두거나 PATH에 등록해 주세요.",
             APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
-    HistoryLoad(folder);
+    HistoryEnsureLoaded(folder);
 
     DownloadBatch *batch = (DownloadBatch *)malloc(sizeof(DownloadBatch));
     if (!batch) {
@@ -1371,6 +1451,26 @@ static void StartDownload(BOOL failed_only) {
     else {
         free(batch);
         InterlockedExchange((LONG *)&g_download_running, 0);
+    }
+}
+
+static unsigned __stdcall ToolPreparationThread(void *param) {
+    (void)param;
+    PrepareBundledTools();
+    RefreshTools();
+    BOOL available = ToolsAvailable();
+    InterlockedExchange((LONG *)&g_tools_loading, 0);
+    PostMessageW(g_main, WM_APP_TOOLS_READY, available, 0);
+    return 0;
+}
+
+static void StartToolPreparation(void) {
+    if (InterlockedCompareExchange((LONG *)&g_tools_loading, 1, 0) != 0) return;
+    uintptr_t thread = _beginthreadex(NULL, 0, ToolPreparationThread, NULL, 0, NULL);
+    if (thread) {
+        CloseHandle((HANDLE)thread);
+    } else {
+        ToolPreparationThread(NULL);
     }
 }
 
@@ -1562,7 +1662,70 @@ static void OpenHistoryFile(void) {
     HistoryPath(folder, path, MAX_PATH);
     FILE *f = _wfopen(path, L"ab");
     if (f) fclose(f);
+    EnterCriticalSection(&g_history_lock);
+    g_history_folder[0] = 0;
+    LeaveCriticalSection(&g_history_lock);
     ShellExecuteW(g_main, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void CenterDialog(HWND dialog) {
+    RECT dialog_rect, owner_rect;
+    HWND owner = GetWindow(dialog, GW_OWNER);
+    if (!owner || !GetWindowRect(dialog, &dialog_rect) || !GetWindowRect(owner, &owner_rect)) return;
+    int width = dialog_rect.right - dialog_rect.left;
+    int height = dialog_rect.bottom - dialog_rect.top;
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 2;
+    SetWindowPos(dialog, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void OpenThirdPartyNotices(HWND owner) {
+    wchar_t path[MAX_PATH];
+    if (g_tools_dir[0] && SUCCEEDED(StringCchPrintfW(path, MAX_PATH,
+            L"%s\\THIRD_PARTY_NOTICES.txt", g_tools_dir)) && FileExistsW2(path)) {
+        HINSTANCE opened = ShellExecuteW(owner, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+        if ((INT_PTR)opened > 32) return;
+    }
+    MessageBoxW(owner,
+        L"포함된 외부 구성 요소\r\n\r\n"
+        L"yt-dlp Windows 실행 파일 — GNU GPL v3 이상\r\n"
+        L"FFmpeg Essentials Build — GNU GPL v3\r\n\r\n"
+        L"각 구성 요소의 원문 라이선스와 소스 주소는 배포 파일에 포함된 "
+        L"THIRD_PARTY_NOTICES.txt에서 확인할 수 있습니다.",
+        L"제3자 소프트웨어 고지", MB_OK | MB_ICONINFORMATION);
+}
+
+static INT_PTR CALLBACK AboutDialogProc(HWND dialog, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
+    switch (msg) {
+        case WM_INITDIALOG: {
+            wchar_t version[64];
+            StringCchPrintfW(version, 64, L"버전 %s (64비트)", APP_VERSION_W);
+            SetDlgItemTextW(dialog, IDC_ABOUT_VERSION, version);
+            SendDlgItemMessageW(dialog, IDC_ABOUT_ICON, STM_SETICON,
+                                (WPARAM)LoadIconW(NULL, IDI_INFORMATION), 0);
+            CenterDialog(dialog);
+            return TRUE;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDC_ABOUT_LICENSE) {
+                OpenThirdPartyNotices(dialog);
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+                EndDialog(dialog, LOWORD(wParam));
+                return TRUE;
+            }
+            break;
+        case WM_CLOSE:
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void ShowAboutDialog(HWND owner) {
+    DialogBoxParamW(g_instance, MAKEINTRESOURCEW(IDD_ABOUT), owner, AboutDialogProc, 0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1571,8 +1734,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_main = hwnd;
             SetMenu(hwnd, CreateAppMenu());
             CreateUi(hwnd);
-            RefreshTools();
-            if (!g_ytdlp[0]) SetControlText(g_status, L"상태: yt-dlp.exe 필요");
+            SetControlText(g_status, L"다운로드 구성 요소 준비 중...");
+            StartToolPreparation();
             return 0;
 
         case WM_COMMAND: {
@@ -1601,11 +1764,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_JOB_CLEAR: ClearJobs(); break;
                 case IDM_TOOLS_REFRESH_STATS: UpdateFolderStatsUI(); break;
                 case IDM_TOOLS_OPEN_HISTORY: OpenHistoryFile(); break;
-                case IDM_HELP_ABOUT:
-                    MessageBoxW(hwnd,
-                        L"Seowol YT MP3 Downloader 1.0.3\r\n\r\nWindows 클래식 스타일의 가벼운 MP3 다운로드 도구",
-                        APP_TITLE, MB_OK | MB_ICONINFORMATION);
-                    break;
+                case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
                 case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
                 case IDC_CHK_DEDUP:
@@ -1627,7 +1786,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_APP_JOB_UPDATED:
             UpdateListRow((int)wParam);
-            UpdatePreviewFromSelection();
+            if (ListView_GetNextItem(g_list, -1, LVNI_SELECTED) == (int)wParam) {
+                UpdatePreviewFromSelection();
+            }
             return 0;
 
         case WM_APP_REBUILD_LIST:
@@ -1672,14 +1833,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             wchar_t text[180];
             StringCchPrintfW(text, 180, L"상태: 작업 완료 (완료 %d, 건너뜀 %d, 실패 %d)",
                              done, skipped, failed);
-            SendMessageW(g_progress, PBM_SETPOS, 100, 0);
+            SendMessageW(g_progress, PBM_SETPOS, wParam ? 100 : 0, 0);
             SetControlText(g_status, text);
             UpdateFolderStatsUI();
             return 0;
         }
 
         case WM_APP_FOLDER_STATS:
-            UpdateFolderStatsUI();
+            ApplyFolderStatsResult((FolderStatsResult *)lParam);
+            return 0;
+
+        case WM_APP_TOOLS_READY:
+            SetControlText(g_status, wParam ? L"준비 완료" : L"상태: yt-dlp 또는 ffmpeg를 찾을 수 없음");
             return 0;
 
         case WM_SIZE:
@@ -1688,7 +1853,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_CLOSE:
             if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
-                InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0)) {
+                InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
+                InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
                 MessageBoxW(hwnd, L"현재 작업이 진행 중입니다. 작업이 끝난 뒤 종료해 주세요.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
@@ -1750,6 +1916,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     InitializeCriticalSection(&g_jobs_lock);
     InitializeCriticalSection(&g_file_lock);
     InitializeCriticalSection(&g_history_lock);
+    InitializeCriticalSection(&g_tools_lock);
     int result = 1;
     GetAppDirectory(g_app_dir, MAX_PATH);
 
@@ -1758,9 +1925,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         goto cleanup;
     }
 
-    PrepareBundledTools();
-    RefreshTools();
     if (lpCmdLine && wcsstr(lpCmdLine, L"--self-test-tools")) {
+        PrepareBundledTools();
+        RefreshTools();
         wchar_t ffprobe[MAX_PATH];
         BOOL ok = g_ytdlp[0] && g_ffmpeg[0] && FindTool(L"ffprobe.exe", ffprobe, MAX_PATH);
         result = ok ? 0 : 2;
@@ -1821,6 +1988,7 @@ cleanup:
     DeleteCriticalSection(&g_history_lock);
     DeleteCriticalSection(&g_file_lock);
     DeleteCriticalSection(&g_jobs_lock);
+    DeleteCriticalSection(&g_tools_lock);
     if (SUCCEEDED(co_init)) CoUninitialize();
     return result;
 }

@@ -1,0 +1,15 @@
+Seowol YT MP3 Downloader License
+
+Copyright (c) 2026 NokMyo. All rights reserved.
+
+The unmodified official binary may be used for personal, non-commercial use.
+No permission is granted to copy, modify, reverse engineer, redistribute, sell,
+or sublicense the application code except where applicable law expressly permits.
+
+THE APPLICATION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+This license applies only to the original application code. Bundled third-party
+programs and materials remain subject to their respective licenses as described
+in THIRD_PARTY_NOTICES.txt.

@@ -1,0 +1,55 @@
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "resource.h"
+#include "version.h"
+
+IDD_ABOUT DIALOGEX 0, 0, 315, 205
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Seowol YT MP3 Downloader 정보"
+FONT 9, "굴림"
+BEGIN
+    CONTROL         "", IDC_ABOUT_ICON, "STATIC", SS_ICON | WS_CHILD | WS_VISIBLE, 14, 15, 24, 24
+    LTEXT           "Seowol YT MP3 Downloader", -1, 47, 14, 238, 13
+    LTEXT           "버전", IDC_ABOUT_VERSION, 47, 31, 238, 11
+    LTEXT           "YouTube 링크를 MP3 파일로 정리하는 Windows 프로그램", -1, 47, 47, 245, 18
+    GROUPBOX        "저작권 및 라이선스", -1, 12, 72, 291, 87
+    LTEXT           "Copyright © 2026 NokMyo. All rights reserved.", -1, 23, 90, 268, 12
+    LTEXT           "프로그램 자체 코드는 저작권자의 독점 소프트웨어입니다. 외부 구성 요소에는 각 프로젝트의 오픈소스 라이선스가 적용됩니다.", -1, 23, 107, 268, 29
+    LTEXT           "yt-dlp 실행 파일: GPL v3 이상   |   FFmpeg Essentials: GPL v3", -1, 23, 140, 268, 11
+    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 118, 171, 91, 23
+    DEFPUSHBUTTON   "확인", IDOK, 218, 171, 74, 23
+END
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION APP_VERSION_COMMA
+ PRODUCTVERSION APP_VERSION_COMMA
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041204B0"
+        BEGIN
+            VALUE "CompanyName", "NokMyo\0"
+            VALUE "FileDescription", "Seowol YT MP3 Downloader\0"
+            VALUE "FileVersion", APP_VERSION_TEXT "\0"
+            VALUE "InternalName", "SeowolYTMP3Downloader\0"
+            VALUE "LegalCopyright", APP_COPYRIGHT_TEXT "\0"
+            VALUE "OriginalFilename", "SeowolYTMP3Downloader.exe\0"
+            VALUE "ProductName", "Seowol YT MP3 Downloader\0"
+            VALUE "ProductVersion", APP_VERSION_TEXT "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0412, 1200
+    END
+END

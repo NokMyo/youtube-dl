@@ -9,12 +9,10 @@ static BOOL AppendChar(wchar_t *command, size_t cch, size_t *length, wchar_t val
     return TRUE;
 }
 
-static BOOL AppendArgument(wchar_t *command, size_t cch, const wchar_t *argument) {
-    if (!command || !argument || !cch) return FALSE;
-    size_t length = wcslen(command);
-    if (length >= cch) return FALSE;
-    if (length && !AppendChar(command, cch, &length, L' ')) return FALSE;
-    if (!AppendChar(command, cch, &length, L'"')) return FALSE;
+static BOOL AppendArgument(wchar_t *command, size_t cch, size_t *length, const wchar_t *argument) {
+    if (!command || !argument || !length || !cch || *length >= cch) return FALSE;
+    if (*length && !AppendChar(command, cch, length, L' ')) return FALSE;
+    if (!AppendChar(command, cch, length, L'"')) return FALSE;
 
     size_t backslashes = 0;
     for (const wchar_t *cursor = argument;; ++cursor) {
@@ -25,21 +23,22 @@ static BOOL AppendArgument(wchar_t *command, size_t cch, const wchar_t *argument
         size_t copies = *cursor == L'"' ? backslashes * 2 + 1 : backslashes;
         if (!*cursor) copies = backslashes * 2;
         for (size_t i = 0; i < copies; ++i) {
-            if (!AppendChar(command, cch, &length, L'\\')) return FALSE;
+            if (!AppendChar(command, cch, length, L'\\')) return FALSE;
         }
         backslashes = 0;
         if (!*cursor) break;
-        if (!AppendChar(command, cch, &length, *cursor)) return FALSE;
+        if (!AppendChar(command, cch, length, *cursor)) return FALSE;
     }
-    return AppendChar(command, cch, &length, L'"');
+    return AppendChar(command, cch, length, L'"');
 }
 
 BOOL CommandLine_Build(wchar_t *command, size_t cch,
                        const wchar_t *const *arguments, size_t argument_count) {
     if (!command || !cch || !arguments || !argument_count) return FALSE;
     command[0] = 0;
+    size_t length = 0;
     for (size_t i = 0; i < argument_count; ++i) {
-        if (!AppendArgument(command, cch, arguments[i])) {
+        if (!AppendArgument(command, cch, &length, arguments[i])) {
             command[0] = 0;
             return FALSE;
         }

@@ -2,7 +2,7 @@
 
 휴대폰에서 모아 둔 YouTube 링크를 Windows PC에서 한꺼번에 MP3로 정리해 내려받는 C + Win32 유틸리티입니다.
 
-화면은 Windows 98/2000 시절의 투박한 유틸리티 느낌을 유지하고, 실제 다운로드/변환 엔진은 `yt-dlp`, `ffmpeg`, `ffprobe`를 사용합니다. 공식 릴리스의 `SeowolYTMP3Downloader.exe`에는 이 도구들이 함께 포함되어 있어 별도 설치 없이 실행할 수 있습니다.
+화면은 Windows 98/2000 시절의 투박한 유틸리티 느낌을 유지합니다. 별도 그림이나 웹 기반 UI를 사용하지 않고 Windows 기본 컨트롤만 사용해 가볍게 동작하며, 실제 다운로드/변환 엔진은 `yt-dlp`, `ffmpeg`, `ffprobe`를 사용합니다. 공식 릴리스의 `SeowolYTMP3Downloader.exe`에는 이 도구들이 함께 포함되어 있어 별도 설치 없이 실행할 수 있습니다.
 
 > 본인이 소유했거나 다운로드가 허용된 콘텐츠 등 이용 권한이 있는 콘텐츠에 사용하세요.
 
@@ -22,6 +22,8 @@
 - 메타데이터 4개 병렬 조회와 최대 2개 병렬 다운로드
 - 항목 상태에 개별 진행률 표시 및 전체 진행률 표시
 - Windows 95/2000풍 클래식 메뉴·상태 표시줄
+- 제품 버전·저작권·라이선스를 확인할 수 있는 프로그램 정보 창
+- 첫 실행 구성 요소를 뒤에서 준비해 프로그램 창을 빠르게 표시
 
 ## 기본 저장 위치
 
@@ -37,7 +39,7 @@ Music\YouTubeMP3
 SeowolYTMP3Downloader.exe
 ```
 
-첫 실행 시 내장된 `yt-dlp`, `ffmpeg`, `ffprobe`가 `%LOCALAPPDATA%\SeowolYTMP3Downloader\tools`에 자동으로 준비되고 이후 재사용됩니다.
+첫 실행 시 내장된 `yt-dlp`, `ffmpeg`, `ffprobe`가 `%LOCALAPPDATA%\SeowolYTMP3Downloader\tools`에 뒤에서 자동으로 준비되고 이후 재사용됩니다.
 
 ## 빌드
 
@@ -61,6 +63,7 @@ build\Release\SeowolYTMP3Downloader.exe
 ```
 
 외부 GUI 라이브러리는 사용하지 않고 Windows 기본 Win32 API와 Common Controls를 사용합니다.
+Release 빌드에는 전체 프로그램 최적화와 사용하지 않는 코드 제거가 적용됩니다.
 
 빌드된 실행 파일의 파일명·명령행 처리 자체 검사는 아래처럼 실행할 수 있습니다.
 
@@ -95,6 +98,7 @@ Lauv - I Like Me Better [Official Audio]
 ```text
 .
 ├─ src/
+│  ├─ app.rc / resource.h / version.h.in
 │  ├─ command_line.c / command_line.h
 │  ├─ filename.c / filename.h
 │  └─ main.c
@@ -105,3 +109,7 @@ Lauv - I Like Me Better [Official Audio]
 ├─ build.bat
 └─ README.md
 ```
+
+## 라이선스
+
+프로그램 자체 코드는 [LICENSE.txt](LICENSE.txt)의 조건이 적용됩니다. 공식 실행 파일에 포함되는 `yt-dlp` Windows 실행 파일과 FFmpeg Essentials Build는 각각의 GPL 조건이 적용되며, 원문 라이선스와 소스 주소는 실행 시 준비되는 `THIRD_PARTY_NOTICES.txt`에서 확인할 수 있습니다.
