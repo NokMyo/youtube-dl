@@ -1208,7 +1208,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
 
     wchar_t output_template[MAX_PATH * 2];
     if (FAILED(StringCchPrintfW(output_template, MAX_PATH * 2,
-                               L"%s\\%s.%%(ext)s", folder, job.video_id))) {
+                               L"%s\\%s.%d.%%(ext)s", folder, job.video_id, index))) {
         return FailDownloadJob(index, L"임시 다운로드 경로가 너무 깁니다.");
     }
 
@@ -1240,7 +1240,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     }
 
     wchar_t temp_mp3[MAX_PATH];
-    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\%s.mp3", folder, job.video_id))) {
+    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\%s.%d.mp3", folder, job.video_id, index))) {
         return FailDownloadJob(index, L"변환 파일 경로가 너무 깁니다.");
     }
     if (!FileExistsW2(temp_mp3)) {
