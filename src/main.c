@@ -24,33 +24,27 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #define APP_TITLE L"Seowol YT MP3 Downloader"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
-#define APP_CLIENT_W 1060
-#define APP_CLIENT_H 700
+#define CLEAN_NAME_CCH 256
+#define APP_CLIENT_W 960
+#define APP_CLIENT_H 640
 #define META_WORKER_COUNT 4
 #define DOWNLOAD_WORKER_COUNT 2
+#define IDT_SPLASH_ANIMATE 1
+#define IDT_SHOW_MAIN 2
+#define IDT_AUTO_UPDATE 3
 
 #define IDC_URL_EDIT            1001
 #define IDC_ADD_LINKS           1002
-#define IDC_LOAD_TXT            1003
-#define IDC_REMOVE_DUP          1004
 #define IDC_LIST                1005
-#define IDC_CHK_DEDUP           1010
-#define IDC_CHK_SKIP            1011
-#define IDC_CHK_SANITIZE        1012
-#define IDC_CHK_CLEAN           1013
-#define IDC_CHK_SIZE            1014
 #define IDC_FOLDER_EDIT         1020
 #define IDC_FOLDER_BROWSE       1021
-#define IDC_FOLDER_OPEN         1022
 #define IDC_FOLDER_STATS        1023
 #define IDC_DOWNLOAD_ALL        1030
-#define IDC_RETRY_FAILED        1031
-#define IDC_DELETE_SELECTED     1032
-#define IDC_EXIT                1033
 #define IDC_PROGRESS            1040
 #define IDC_STATUS              1041
 #define IDC_OVERALL             1042
@@ -76,11 +70,22 @@
 #define IDM_JOB_DOWNLOAD_ALL    2012
 #define IDM_JOB_RETRY_FAILED    2013
 #define IDM_JOB_CLEAR           2014
+#define IDM_JOB_DELETE_SELECTED 2015
 #define IDM_TOOLS_REFRESH_STATS 2020
 #define IDM_TOOLS_OPEN_HISTORY  2021
 #define IDM_HELP_ABOUT          2030
 #define IDM_HELP_CHECK_UPDATES  2031
 #define IDM_HELP_RELEASES       2032
+#define IDM_OPT_DEDUP           2040
+#define IDM_OPT_SKIP            2041
+#define IDM_OPT_SANITIZE        2042
+#define IDM_OPT_CLEAN           2043
+#define IDM_OPT_SIZE            2044
+#define IDM_OPT_AUTO_UPDATE     2045
+#define IDM_QUALITY_128         2050
+#define IDM_QUALITY_192         2051
+#define IDM_QUALITY_256         2052
+#define IDM_QUALITY_320         2053
 
 #define UPDATE_ERROR            0
 #define UPDATE_CURRENT          1
@@ -101,8 +106,9 @@ typedef struct Job {
     wchar_t raw_title[1024];
     wchar_t artist[512];
     wchar_t track[512];
-    wchar_t clean_name[768];
+    wchar_t clean_name[CLEAN_NAME_CCH];
     wchar_t error[768];
+    ULONGLONG duration_ms;
     ULONGLONG expected_size;
     int progress;
     JobStatus status;
@@ -115,6 +121,7 @@ typedef struct MetaBatch {
 
 typedef struct DownloadBatch {
     BOOL failed_only;
+    int bitrate;
     wchar_t folder[MAX_PATH];
 } DownloadBatch;
 
@@ -128,6 +135,7 @@ typedef struct DownloadWork {
     int total;
     volatile LONG next;
     volatile LONG done;
+    int bitrate;
     wchar_t folder[MAX_PATH];
 } DownloadWork;
 
@@ -145,8 +153,15 @@ typedef struct FolderStatsResult {
 
 typedef struct UpdateResult {
     int state;
+    BOOL automatic;
     wchar_t latest[32];
 } UpdateResult;
+
+typedef struct DownloadJobSnapshot {
+    wchar_t url[2048];
+    wchar_t video_id[128];
+    wchar_t clean_name[CLEAN_NAME_CCH];
+} DownloadJobSnapshot;
 
 typedef struct MetadataLines {
     wchar_t meta[4096];
@@ -171,11 +186,8 @@ static HWND g_status;
 static HWND g_overall;
 static HWND g_raw_title;
 static HWND g_clean_title;
-static HWND g_chk_dedup;
-static HWND g_chk_skip;
-static HWND g_chk_sanitize;
-static HWND g_chk_clean;
-static HWND g_chk_size;
+static HMENU g_options_menu;
+static HMENU g_quality_menu;
 static HFONT g_font;
 static HFONT g_splash_title_font;
 static HFONT g_splash_body_font;
@@ -199,6 +211,8 @@ static volatile LONG g_opt_skip = 1;
 static volatile LONG g_opt_sanitize = 1;
 static volatile LONG g_opt_clean = 1;
 static volatile LONG g_opt_size = 1;
+static volatile LONG g_audio_bitrate = 320;
+static volatile LONG g_auto_update = 1;
 
 static wchar_t g_app_dir[MAX_PATH];
 static wchar_t g_ytdlp[MAX_PATH];
@@ -206,10 +220,111 @@ static wchar_t g_ffmpeg[MAX_PATH];
 static wchar_t g_ffmpeg_dir[MAX_PATH];
 static wchar_t g_tools_dir[MAX_PATH];
 static wchar_t g_history_folder[MAX_PATH];
+static wchar_t g_saved_folder[MAX_PATH];
 static int g_main_show_command = SW_SHOWNORMAL;
 static ULONGLONG g_splash_started = 0;
 
 static const wchar_t *RELEASES_URL = L"https://github.com/NokMyo/youtube-dl/releases";
+static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\SeowolYTMP3Downloader";
+
+static BOOL IsSupportedBitrate(DWORD value) {
+    return value == 128 || value == 192 || value == 256 || value == 320;
+}
+
+static BOOL ReadSettingValue(const wchar_t *name, DWORD expected_type,
+                             void *value, DWORD *value_size) {
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+        return FALSE;
+    }
+    DWORD type = 0;
+    LONG status = RegQueryValueExW(key, name, NULL, &type, (BYTE *)value, value_size);
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS && type == expected_type;
+}
+
+static void WriteSettingValue(const wchar_t *name, DWORD type,
+                              const void *value, DWORD value_size) {
+    HKEY key = NULL;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return;
+    RegSetValueExW(key, name, 0, type, (const BYTE *)value, value_size);
+    RegCloseKey(key);
+}
+
+static BOOL ReadSettingDword(const wchar_t *name, DWORD *value) {
+    DWORD size = sizeof(*value);
+    return ReadSettingValue(name, REG_DWORD, value, &size) && size == sizeof(*value);
+}
+
+static void WriteSettingDword(const wchar_t *name, DWORD value) {
+    WriteSettingValue(name, REG_DWORD, &value, sizeof(value));
+}
+
+static BOOL ReadSettingQword(const wchar_t *name, ULONGLONG *value) {
+    DWORD size = sizeof(*value);
+    return ReadSettingValue(name, REG_QWORD, value, &size) && size == sizeof(*value);
+}
+
+static void WriteSettingQword(const wchar_t *name, ULONGLONG value) {
+    WriteSettingValue(name, REG_QWORD, &value, sizeof(value));
+}
+
+static void WriteSettingString(const wchar_t *name, const wchar_t *value) {
+    if (!value) value = L"";
+    WriteSettingValue(name, REG_SZ, value, (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
+}
+
+static void LoadSettings(void) {
+    struct BooleanSetting {
+        const wchar_t *name;
+        volatile LONG *target;
+    } boolean_settings[] = {
+        { L"RemoveDuplicates", &g_opt_dedup },
+        { L"SkipDownloaded", &g_opt_skip },
+        { L"SanitizeFilenames", &g_opt_sanitize },
+        { L"CleanNames", &g_opt_clean },
+        { L"ShowEstimatedSize", &g_opt_size },
+        { L"CheckUpdatesAtStartup", &g_auto_update }
+    };
+    for (size_t i = 0; i < sizeof(boolean_settings) / sizeof(boolean_settings[0]); ++i) {
+        DWORD value = 0;
+        if (ReadSettingDword(boolean_settings[i].name, &value)) {
+            InterlockedExchange((LONG *)boolean_settings[i].target, value ? 1 : 0);
+        }
+    }
+
+    DWORD bitrate = 0;
+    if (ReadSettingDword(L"AudioBitrate", &bitrate) && IsSupportedBitrate(bitrate)) {
+        InterlockedExchange((LONG *)&g_audio_bitrate, (LONG)bitrate);
+    }
+
+    DWORD folder_size = sizeof(g_saved_folder);
+    if (!ReadSettingValue(L"OutputFolder", REG_SZ, g_saved_folder, &folder_size)) {
+        g_saved_folder[0] = 0;
+    } else {
+        g_saved_folder[MAX_PATH - 1] = 0;
+    }
+}
+
+static ULONGLONG CurrentFileTimeValue(void) {
+    FILETIME file_time;
+    ULARGE_INTEGER value;
+    GetSystemTimeAsFileTime(&file_time);
+    value.LowPart = file_time.dwLowDateTime;
+    value.HighPart = file_time.dwHighDateTime;
+    return value.QuadPart;
+}
+
+static BOOL ShouldCheckUpdatesAutomatically(void) {
+    if (!InterlockedCompareExchange((LONG *)&g_auto_update, 0, 0)) return FALSE;
+    ULONGLONG last = 0;
+    ULONGLONG now = CurrentFileTimeValue();
+    const ULONGLONG one_day = 24ULL * 60ULL * 60ULL * 10000000ULL;
+    if (ReadSettingQword(L"LastSuccessfulUpdateCheck", &last) &&
+        now >= last && now - last < one_day) return FALSE;
+    return TRUE;
+}
 
 static BOOL FileExistsW2(const wchar_t *path) {
     DWORD a = GetFileAttributesW(path);
@@ -317,6 +432,15 @@ static void WriteBundleStamp(ULONGLONG value) {
     CloseHandle(h);
 }
 
+static ULONGLONG BundleStampFromAttributes(const WIN32_FILE_ATTRIBUTE_DATA *attributes) {
+    ULARGE_INTEGER size, modified;
+    size.HighPart = attributes->nFileSizeHigh;
+    size.LowPart = attributes->nFileSizeLow;
+    modified.HighPart = attributes->ftLastWriteTime.dwHighDateTime;
+    modified.LowPart = attributes->ftLastWriteTime.dwLowDateTime;
+    return size.QuadPart ^ modified.QuadPart ^ 0x53594D5033504B31ULL;
+}
+
 static BOOL PrepareBundledTools(void) {
     wchar_t local[MAX_PATH];
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
@@ -329,14 +453,20 @@ static BOOL PrepareBundledTools(void) {
 
     wchar_t exe[MAX_PATH];
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
-    HANDLE in = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (in == INVALID_HANDLE_VALUE) return FALSE;
-
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    if (!GetFileAttributesExW(exe, GetFileExInfoStandard, &attributes)) return FALSE;
     LARGE_INTEGER total;
-    if (!GetFileSizeEx(in, &total) || total.QuadPart < 16) {
-        CloseHandle(in);
-        return FALSE;
-    }
+    total.HighPart = (LONG)attributes.nFileSizeHigh;
+    total.LowPart = attributes.nFileSizeLow;
+    if (total.QuadPart < 16) return FALSE;
+    ULONGLONG package_stamp = BundleStampFromAttributes(&attributes);
+
+    /* The normal launch path stops here without opening the ~95 MB package. */
+    if (BundledToolFilesExist() && ReadBundleStamp(package_stamp)) return TRUE;
+
+    HANDLE in = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (in == INVALID_HANDLE_VALUE) return FALSE;
 
     LARGE_INTEGER footer_pos;
     footer_pos.QuadPart = -16;
@@ -360,11 +490,6 @@ static BOOL PrepareBundledTools(void) {
         return FALSE;
     }
 
-    if (BundledToolFilesExist() && ReadBundleStamp((ULONGLONG)total.QuadPart)) {
-        CloseHandle(in);
-        return TRUE;
-    }
-
     SetStartupPhase(2);
 
     wchar_t temp_dir[MAX_PATH], zip_path[MAX_PATH];
@@ -376,7 +501,8 @@ static BOOL PrepareBundledTools(void) {
         CloseHandle(in);
         return FALSE;
     }
-    HANDLE out = CreateFileW(zip_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    HANDLE out = CreateFileW(zip_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (out == INVALID_HANDLE_VALUE) {
         CloseHandle(in);
         DeleteFileW(zip_path);
@@ -392,7 +518,8 @@ static BOOL PrepareBundledTools(void) {
         return FALSE;
     }
 
-    unsigned char *buffer = (unsigned char *)malloc(64 * 1024);
+    const DWORD copy_buffer_size = 1024 * 1024;
+    unsigned char *buffer = (unsigned char *)malloc(copy_buffer_size);
     if (!buffer) {
         CloseHandle(out);
         CloseHandle(in);
@@ -403,7 +530,7 @@ static BOOL PrepareBundledTools(void) {
     ULONGLONG remaining = payload_size;
     BOOL copy_ok = TRUE;
     while (remaining) {
-        DWORD want = remaining > 64 * 1024 ? 64 * 1024 : (DWORD)remaining;
+        DWORD want = remaining > copy_buffer_size ? copy_buffer_size : (DWORD)remaining;
         DWORD read_bytes = 0, wrote = 0;
         if (!ReadFile(in, buffer, want, &read_bytes, NULL) || read_bytes != want ||
             !WriteFile(out, buffer, read_bytes, &wrote, NULL) || wrote != read_bytes) {
@@ -445,7 +572,7 @@ static BOOL PrepareBundledTools(void) {
     DeleteFileW(zip_path);
 
     if (extracted && BundledToolFilesExist()) {
-        WriteBundleStamp((ULONGLONG)total.QuadPart);
+        WriteBundleStamp(package_stamp);
         return TRUE;
     }
     return FALSE;
@@ -502,6 +629,11 @@ static const wchar_t *StatusText(JobStatus status) {
     }
 }
 
+static ULONGLONG EstimatedMp3Bytes(ULONGLONG duration_ms, int bitrate) {
+    if (!duration_ms || !IsSupportedBitrate((DWORD)bitrate)) return 0;
+    return duration_ms * (ULONGLONG)bitrate / 8ULL;
+}
+
 static void FormatBytes(ULONGLONG bytes, wchar_t *out, size_t cch) {
     if (bytes == 0) {
         StringCchCopyW(out, cch, L"-");
@@ -523,11 +655,13 @@ static void ApplyClassic(HWND h) {
 }
 
 static void SetControlText(HWND h, const wchar_t *text) {
-    if (h) SetWindowTextW(h, text ? text : L"");
+    if (!h) return;
+    if (h == g_status) SendMessageW(h, SB_SETTEXTW, 0, (LPARAM)(text ? text : L""));
+    else SetWindowTextW(h, text ? text : L"");
 }
 
 static void UpdateListRow(int index) {
-    wchar_t raw_title[1024], clean_name[768];
+    wchar_t raw_title[1024], clean_name[CLEAN_NAME_CCH];
     ULONGLONG expected_size;
     int progress;
     JobStatus status;
@@ -537,7 +671,7 @@ static void UpdateListRow(int index) {
         return;
     }
     StringCchCopyW(raw_title, 1024, g_jobs[index].raw_title);
-    StringCchCopyW(clean_name, 768, g_jobs[index].clean_name);
+    StringCchCopyW(clean_name, CLEAN_NAME_CCH, g_jobs[index].clean_name);
     expected_size = g_jobs[index].expected_size;
     progress = g_jobs[index].progress;
     status = g_jobs[index].status;
@@ -587,7 +721,8 @@ static void UpdatePreviewFromSelection(void) {
         SetControlText(g_clean_title, L"");
         return;
     }
-    Job job;
+    wchar_t raw_title[1024], clean_name[CLEAN_NAME_CCH], error[768];
+    JobStatus status;
     EnterCriticalSection(&g_jobs_lock);
     if (sel >= g_job_count) {
         LeaveCriticalSection(&g_jobs_lock);
@@ -595,15 +730,18 @@ static void UpdatePreviewFromSelection(void) {
         SetControlText(g_clean_title, L"");
         return;
     }
-    job = g_jobs[sel];
+    StringCchCopyW(raw_title, 1024, g_jobs[sel].raw_title);
+    StringCchCopyW(clean_name, CLEAN_NAME_CCH, g_jobs[sel].clean_name);
+    StringCchCopyW(error, 768, g_jobs[sel].error);
+    status = g_jobs[sel].status;
     LeaveCriticalSection(&g_jobs_lock);
-    SetControlText(g_raw_title, job.raw_title);
-    SetControlText(g_clean_title, job.clean_name);
-    if (job.status == JOB_FAILED && job.error[0] &&
+    SetControlText(g_raw_title, raw_title);
+    SetControlText(g_clean_title, clean_name);
+    if (status == JOB_FAILED && error[0] &&
         !InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) &&
         !InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) {
         wchar_t text[900];
-        StringCchPrintfW(text, 900, L"상태: 실패 - %s", job.error);
+        StringCchPrintfW(text, 900, L"상태: 실패 - %s", error);
         SetControlText(g_status, text);
     }
 }
@@ -611,7 +749,9 @@ static void UpdatePreviewFromSelection(void) {
 static void RecomputeNames(void) {
     EnterCriticalSection(&g_jobs_lock);
     for (int i = 0; i < g_job_count; ++i) {
-        if (g_jobs[i].raw_title[0]) BuildCleanFilename(&g_jobs[i], g_jobs[i].clean_name, 768);
+        if (g_jobs[i].raw_title[0]) {
+            BuildCleanFilename(&g_jobs[i], g_jobs[i].clean_name, CLEAN_NAME_CCH);
+        }
     }
     LeaveCriticalSection(&g_jobs_lock);
     RebuildList();
@@ -668,7 +808,7 @@ static void ApplyFolderStatsResult(FolderStatsResult *result) {
     }
     wchar_t size[64], text[256];
     FormatBytes(result->bytes, size, 64);
-    StringCchPrintfW(text, 256, L"현재 폴더: %d곡\r\n총 용량: %s", result->count, size);
+    StringCchPrintfW(text, 256, L"현재 폴더: %d곡  |  총 용량: %s", result->count, size);
     SetControlText(g_folder_stats, text);
     free(result);
 }
@@ -846,10 +986,12 @@ static BOOL FetchMetadataForJob(int index) {
     StringCchCopyW(g_jobs[index].artist, 512, (n > 2 && !IsNA(f[2])) ? f[2] : L"");
     StringCchCopyW(g_jobs[index].track, 512, (n > 3 && !IsNA(f[3])) ? f[3] : L"");
     double duration = (n > 4 && !IsNA(f[4])) ? _wtof(f[4]) : 0.0;
-    g_jobs[index].expected_size = duration > 0.0 ? (ULONGLONG)(duration * 320000.0 / 8.0) : 0;
+    g_jobs[index].duration_ms = duration > 0.0 ? (ULONGLONG)(duration * 1000.0 + 0.5) : 0;
+    int bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
+    g_jobs[index].expected_size = EstimatedMp3Bytes(g_jobs[index].duration_ms, bitrate);
     g_jobs[index].progress = 0;
     g_jobs[index].status = JOB_READY;
-    BuildCleanFilename(&g_jobs[index], g_jobs[index].clean_name, 768);
+    BuildCleanFilename(&g_jobs[index], g_jobs[index].clean_name, CLEAN_NAME_CCH);
     LeaveCriticalSection(&g_jobs_lock);
     PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
     return TRUE;
@@ -1075,6 +1217,8 @@ static void BrowseFolder(void) {
     wchar_t path[MAX_PATH];
     if (SHGetPathFromIDListW(pidl, path)) {
         SetWindowTextW(g_folder_edit, path);
+        StringCchCopyW(g_saved_folder, MAX_PATH, path);
+        WriteSettingString(L"OutputFolder", path);
         UpdateFolderStatsUI();
     }
     CoTaskMemFree(pidl);
@@ -1099,6 +1243,9 @@ static void DeleteSelected(void) {
     int out = 0;
     for (int i = 0; i < g_job_count; ++i) {
         if (!selected[i]) g_jobs[out++] = g_jobs[i];
+    }
+    if (out < g_job_count) {
+        ZeroMemory(&g_jobs[out], sizeof(Job) * (size_t)(g_job_count - out));
     }
     g_job_count = out;
     LeaveCriticalSection(&g_jobs_lock);
@@ -1206,8 +1353,8 @@ static BOOL MakeUniqueDestination(const wchar_t *folder, const wchar_t *filename
     if (FAILED(StringCchPrintfW(out, cch, L"%s\\%s", folder, filename))) return FALSE;
     if (!FileExistsW2(out)) return TRUE;
 
-    wchar_t base[768];
-    StringCchCopyW(base, 768, filename);
+    wchar_t base[CLEAN_NAME_CCH];
+    StringCchCopyW(base, CLEAN_NAME_CCH, filename);
     wchar_t *dot = wcsrchr(base, L'.');
     if (dot) *dot = 0;
     for (int i = 2; i < 1000; ++i) {
@@ -1249,21 +1396,27 @@ static BOOL FailDownloadJob(int index, const wchar_t *message) {
     return FALSE;
 }
 
-static BOOL DownloadOne(int index, const wchar_t *folder) {
-    Job job;
+static BOOL SnapshotDownloadJob(int index, DownloadJobSnapshot *snapshot) {
+    if (!snapshot) return FALSE;
     EnterCriticalSection(&g_jobs_lock);
     if (index < 0 || index >= g_job_count) {
         LeaveCriticalSection(&g_jobs_lock);
         return FALSE;
     }
-    job = g_jobs[index];
+    StringCchCopyW(snapshot->url, 2048, g_jobs[index].url);
+    StringCchCopyW(snapshot->video_id, 128, g_jobs[index].video_id);
+    StringCchCopyW(snapshot->clean_name, CLEAN_NAME_CCH, g_jobs[index].clean_name);
     LeaveCriticalSection(&g_jobs_lock);
+    return TRUE;
+}
+
+static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
+    DownloadJobSnapshot job;
+    if (!SnapshotDownloadJob(index, &job)) return FALSE;
 
     if (!job.video_id[0]) {
         if (!FetchMetadataForJob(index)) return FALSE;
-        EnterCriticalSection(&g_jobs_lock);
-        job = g_jobs[index];
-        LeaveCriticalSection(&g_jobs_lock);
+        if (!SnapshotDownloadJob(index, &job)) return FALSE;
     }
 
     if (!Filename_IsSafe(job.video_id)) {
@@ -1311,11 +1464,13 @@ static BOOL DownloadOne(int index, const wchar_t *folder) {
     }
 
     wchar_t command[8192];
+    wchar_t audio_quality[16];
+    StringCchPrintfW(audio_quality, 16, L"%dK", bitrate);
     const wchar_t *const arguments[] = {
         g_ytdlp, L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
         L"--no-warnings", L"--newline", L"--no-color", L"--force-overwrites",
         L"-f", L"bestaudio/best", L"-x", L"--audio-format", L"mp3",
-        L"--audio-quality", L"320K", L"--ffmpeg-location", g_ffmpeg_dir,
+        L"--audio-quality", audio_quality, L"--ffmpeg-location", g_ffmpeg_dir,
         L"--progress-template", L"download:PROGRESS:%(progress._percent_str)s",
         L"-o", output_template, L"--", job.url
     };
@@ -1387,7 +1542,7 @@ static unsigned __stdcall DownloadWorker(void *param) {
     for (;;) {
         int slot = (int)InterlockedIncrement(&work->next) - 1;
         if (slot >= work->total) break;
-        DownloadOne(work->indices[slot], work->folder);
+        DownloadOne(work->indices[slot], work->folder, work->bitrate);
         int done = (int)InterlockedIncrement(&work->done);
         PostMessageW(g_main, WM_APP_OVERALL, done, work->total);
     }
@@ -1400,6 +1555,7 @@ static unsigned __stdcall DownloadThread(void *param) {
     DownloadWork work;
     ZeroMemory(&work, sizeof(work));
     StringCchCopyW(work.folder, MAX_PATH, batch->folder);
+    work.bitrate = batch->bitrate;
     free(batch);
 
     EnterCriticalSection(&g_jobs_lock);
@@ -1453,6 +1609,8 @@ static void StartDownload(BOOL failed_only) {
         MessageBoxW(g_main, L"저장 폴더를 만들 수 없습니다.", APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
+    StringCchCopyW(g_saved_folder, MAX_PATH, folder);
+    WriteSettingString(L"OutputFolder", folder);
 
     if (!ToolsAvailable()) {
         InterlockedExchange((LONG *)&g_download_running, 0);
@@ -1469,6 +1627,7 @@ static void StartDownload(BOOL failed_only) {
         return;
     }
     batch->failed_only = failed_only;
+    batch->bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
     StringCchCopyW(batch->folder, MAX_PATH, folder);
     SetControlText(g_status, L"다운로드 준비 중...");
     SendMessageW(g_progress, PBM_SETPOS, 0, 0);
@@ -1513,8 +1672,8 @@ static HWND AddCtl(DWORD ex, const wchar_t *cls, const wchar_t *text, DWORD styl
 
 static void InitListColumns(void) {
     struct Col { const wchar_t *name; int width; } cols[] = {
-        { L"번호", 45 }, { L"제목", 205 }, { L"예상 이름", 245 },
-        { L"예상 용량", 80 }, { L"상태", 100 }
+        { L"번호", 48 }, { L"제목", 285 }, { L"예상 이름", 300 },
+        { L"예상 용량", 95 }, { L"상태", 170 }
     };
     for (int i = 0; i < 5; ++i) {
         LVCOLUMNW c;
@@ -1529,6 +1688,11 @@ static void InitListColumns(void) {
 }
 
 static void SetDefaultFolder(void) {
+    if (g_saved_folder[0]) {
+        SetWindowTextW(g_folder_edit, g_saved_folder);
+        UpdateFolderStatsUI();
+        return;
+    }
     wchar_t music[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYMUSIC | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, music))) {
         wchar_t folder[MAX_PATH];
@@ -1541,13 +1705,106 @@ static void SetDefaultFolder(void) {
     UpdateFolderStatsUI();
 }
 
+static void UpdateStatusBarLayout(HWND hwnd) {
+    if (!g_status) return;
+    SendMessageW(g_status, WM_SIZE, 0, 0);
+    RECT client;
+    GetClientRect(hwnd, &client);
+    int parts[2] = { client.right - 145, -1 };
+    SendMessageW(g_status, SB_SETPARTS, 2, (LPARAM)parts);
+    wchar_t quality[48];
+    int bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
+    StringCchPrintfW(quality, 48, L"MP3 %d kbps", bitrate);
+    SendMessageW(g_status, SB_SETTEXTW, 1, (LPARAM)quality);
+}
+
+static void SyncOptionMenuChecks(void) {
+    if (!g_options_menu || !g_quality_menu) return;
+    struct MenuSetting {
+        UINT id;
+        volatile LONG *value;
+    } settings[] = {
+        { IDM_OPT_DEDUP, &g_opt_dedup },
+        { IDM_OPT_SKIP, &g_opt_skip },
+        { IDM_OPT_SANITIZE, &g_opt_sanitize },
+        { IDM_OPT_CLEAN, &g_opt_clean },
+        { IDM_OPT_SIZE, &g_opt_size },
+        { IDM_OPT_AUTO_UPDATE, &g_auto_update }
+    };
+    for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); ++i) {
+        UINT flags = MF_BYCOMMAND |
+            (InterlockedCompareExchange((LONG *)settings[i].value, 0, 0) ? MF_CHECKED : MF_UNCHECKED);
+        CheckMenuItem(g_options_menu, settings[i].id, flags);
+    }
+
+    int bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
+    UINT selected = bitrate == 128 ? IDM_QUALITY_128 :
+                    bitrate == 192 ? IDM_QUALITY_192 :
+                    bitrate == 256 ? IDM_QUALITY_256 : IDM_QUALITY_320;
+    CheckMenuRadioItem(g_quality_menu, IDM_QUALITY_128, IDM_QUALITY_320,
+                       selected, MF_BYCOMMAND);
+}
+
+static void RecomputeExpectedSizes(void) {
+    int bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
+    EnterCriticalSection(&g_jobs_lock);
+    for (int i = 0; i < g_job_count; ++i) {
+        g_jobs[i].expected_size = EstimatedMp3Bytes(g_jobs[i].duration_ms, bitrate);
+    }
+    LeaveCriticalSection(&g_jobs_lock);
+    RebuildList();
+}
+
+static void SetAudioBitrate(int bitrate) {
+    if (!IsSupportedBitrate((DWORD)bitrate)) return;
+    if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) {
+        MessageBoxW(g_main, L"다운로드가 끝난 뒤 음질을 변경해 주세요.",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (InterlockedExchange((LONG *)&g_audio_bitrate, bitrate) != bitrate) {
+        WriteSettingDword(L"AudioBitrate", (DWORD)bitrate);
+        RecomputeExpectedSizes();
+    }
+    SyncOptionMenuChecks();
+    UpdateStatusBarLayout(g_main);
+}
+
+static void ToggleBooleanOption(int id) {
+    volatile LONG *target = NULL;
+    const wchar_t *setting_name = NULL;
+    BOOL rebuild_names = FALSE, rebuild_list = FALSE;
+    switch (id) {
+        case IDM_OPT_DEDUP: target = &g_opt_dedup; setting_name = L"RemoveDuplicates"; break;
+        case IDM_OPT_SKIP: target = &g_opt_skip; setting_name = L"SkipDownloaded"; break;
+        case IDM_OPT_SANITIZE:
+            target = &g_opt_sanitize; setting_name = L"SanitizeFilenames"; rebuild_names = TRUE; break;
+        case IDM_OPT_CLEAN:
+            target = &g_opt_clean; setting_name = L"CleanNames"; rebuild_names = TRUE; break;
+        case IDM_OPT_SIZE:
+            target = &g_opt_size; setting_name = L"ShowEstimatedSize"; rebuild_list = TRUE; break;
+        case IDM_OPT_AUTO_UPDATE:
+            target = &g_auto_update; setting_name = L"CheckUpdatesAtStartup"; break;
+        default: return;
+    }
+    LONG current = InterlockedCompareExchange((LONG *)target, 0, 0);
+    LONG next = current ? 0 : 1;
+    InterlockedExchange((LONG *)target, next);
+    WriteSettingDword(setting_name, next ? 1U : 0U);
+    SyncOptionMenuChecks();
+    if (rebuild_names) RecomputeNames();
+    else if (rebuild_list) RebuildList();
+}
+
 static HMENU CreateAppMenu(void) {
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
     HMENU job = CreatePopupMenu();
     HMENU tools = CreatePopupMenu();
     HMENU help = CreatePopupMenu();
-    if (!bar || !file || !job || !tools || !help) return bar;
+    g_options_menu = CreatePopupMenu();
+    g_quality_menu = CreatePopupMenu();
+    if (!bar || !file || !job || !tools || !help || !g_options_menu || !g_quality_menu) return bar;
 
     AppendMenuW(file, MF_STRING, IDM_FILE_LOAD_TXT, L"텍스트 파일 불러오기...");
     AppendMenuW(file, MF_STRING, IDM_FILE_BROWSE_FOLDER, L"저장 폴더 변경...");
@@ -1556,12 +1813,27 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(file, MF_STRING, IDM_FILE_EXIT, L"끝내기");
 
     AppendMenuW(job, MF_STRING, IDM_JOB_ADD_LINKS, L"링크 추가 및 조회");
+    AppendMenuW(job, MF_STRING, IDM_JOB_DELETE_SELECTED, L"선택 항목 삭제\tDelete");
     AppendMenuW(job, MF_STRING, IDM_JOB_REMOVE_DUP, L"중복 항목 제거");
     AppendMenuW(job, MF_SEPARATOR, 0, NULL);
     AppendMenuW(job, MF_STRING, IDM_JOB_DOWNLOAD_ALL, L"전체 다운로드 시작");
     AppendMenuW(job, MF_STRING, IDM_JOB_RETRY_FAILED, L"실패 항목 재시도");
     AppendMenuW(job, MF_SEPARATOR, 0, NULL);
     AppendMenuW(job, MF_STRING, IDM_JOB_CLEAR, L"대기 목록 비우기");
+
+    AppendMenuW(g_quality_menu, MF_STRING, IDM_QUALITY_128, L"128 kbps (작은 용량)");
+    AppendMenuW(g_quality_menu, MF_STRING, IDM_QUALITY_192, L"192 kbps");
+    AppendMenuW(g_quality_menu, MF_STRING, IDM_QUALITY_256, L"256 kbps");
+    AppendMenuW(g_quality_menu, MF_STRING, IDM_QUALITY_320, L"320 kbps (최고 음질)");
+    AppendMenuW(g_options_menu, MF_POPUP, (UINT_PTR)g_quality_menu, L"MP3 음질");
+    AppendMenuW(g_options_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_DEDUP, L"중복 링크 자동 제거");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SKIP, L"이미 다운로드한 곡 건너뛰기");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SANITIZE, L"파일명 금지 문자 자동 제거");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_CLEAN, L"이름 자동 정리");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SIZE, L"예상 파일 용량 표시");
+    AppendMenuW(g_options_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_AUTO_UPDATE, L"시작할 때 업데이트 알림");
 
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_REFRESH_STATS, L"폴더 정보 새로 고침");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
@@ -1572,8 +1844,10 @@ static HMENU CreateAppMenu(void) {
 
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"파일(&F)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)job, L"작업(&A)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)g_options_menu, L"옵션(&O)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)tools, L"도구(&T)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"도움말(&H)");
+    SyncOptionMenuChecks();
     return bar;
 }
 
@@ -1583,95 +1857,51 @@ static void CreateUi(HWND hwnd) {
                          NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
 
     AddCtl(0, L"BUTTON", L"1. 유튜브 링크", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           8, 6, 698, 168, 0, hwnd);
+           8, 6, 944, 130, 0, hwnd);
     g_url_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                        18, 25, 678, 102, IDC_URL_EDIT, hwnd);
-    AddCtl(0, L"BUTTON", L"링크 추가", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           18, 136, 112, 27, IDC_ADD_LINKS, hwnd);
-    AddCtl(0, L"BUTTON", L"TXT 불러오기", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           138, 136, 120, 27, IDC_LOAD_TXT, hwnd);
-    AddCtl(0, L"BUTTON", L"중복 제거", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           266, 136, 112, 27, IDC_REMOVE_DUP, hwnd);
+                        18, 25, 924, 70, IDC_URL_EDIT, hwnd);
+    AddCtl(0, L"BUTTON", L"링크 추가 및 조회", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+           782, 102, 160, 27, IDC_ADD_LINKS, hwnd);
 
     AddCtl(0, L"BUTTON", L"2. 다운로드 대기 목록", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           8, 178, 698, 278, 0, hwnd);
+           8, 142, 944, 272, 0, hwnd);
     g_list = AddCtl(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
-                    18, 198, 678, 246, IDC_LIST, hwnd);
+                    18, 162, 924, 240, IDC_LIST, hwnd);
     InitListColumns();
 
-    AddCtl(0, L"BUTTON", L"3. 옵션", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           714, 6, 338, 210, 0, hwnd);
-    g_chk_dedup = AddCtl(0, L"BUTTON", L"중복 링크 자동 제거", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                         730, 29, 300, 22, IDC_CHK_DEDUP, hwnd);
-    g_chk_skip = AddCtl(0, L"BUTTON", L"이미 다운로드한 곡 건너뛰기", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                        730, 63, 300, 22, IDC_CHK_SKIP, hwnd);
-    g_chk_sanitize = AddCtl(0, L"BUTTON", L"파일명 금지 문자 자동 제거", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                            730, 97, 300, 22, IDC_CHK_SANITIZE, hwnd);
-    g_chk_clean = AddCtl(0, L"BUTTON", L"이름 자동 정리 (아티스트 - 곡명)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                         730, 131, 300, 22, IDC_CHK_CLEAN, hwnd);
-    g_chk_size = AddCtl(0, L"BUTTON", L"예상 파일 용량 표시", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                        730, 165, 300, 22, IDC_CHK_SIZE, hwnd);
-    SendMessageW(g_chk_dedup, BM_SETCHECK, BST_CHECKED, 0);
-    SendMessageW(g_chk_skip, BM_SETCHECK, BST_CHECKED, 0);
-    SendMessageW(g_chk_sanitize, BM_SETCHECK, BST_CHECKED, 0);
-    SendMessageW(g_chk_clean, BM_SETCHECK, BST_CHECKED, 0);
-    SendMessageW(g_chk_size, BM_SETCHECK, BST_CHECKED, 0);
-
-    AddCtl(0, L"BUTTON", L"4. 저장 폴더", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           714, 222, 338, 234, 0, hwnd);
-    g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                           730, 246, 230, 24, IDC_FOLDER_EDIT, hwnd);
-    AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           966, 245, 70, 26, IDC_FOLDER_BROWSE, hwnd);
-    g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡\r\n총 용량: -", WS_CHILD | WS_VISIBLE,
-                            730, 290, 290, 48, IDC_FOLDER_STATS, hwnd);
-    AddCtl(0, L"BUTTON", L"폴더 열기", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           730, 408, 112, 28, IDC_FOLDER_OPEN, hwnd);
-
-    AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-           12, 466, 190, 34, IDC_DOWNLOAD_ALL, hwnd);
-    AddCtl(0, L"BUTTON", L"실패 항목 재시도", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           210, 466, 190, 34, IDC_RETRY_FAILED, hwnd);
-    AddCtl(0, L"BUTTON", L"선택 삭제", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           408, 466, 145, 34, IDC_DELETE_SELECTED, hwnd);
-    AddCtl(0, L"BUTTON", L"종료", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-           561, 466, 145, 34, IDC_EXIT, hwnd);
-
-    AddCtl(0, L"BUTTON", L"전체 작업", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           8, 510, 1044, 70, 0, hwnd);
-    g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
-                        86, 535, 690, 20, IDC_PROGRESS, hwnd);
-    SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-    SendMessageW(g_progress, PBM_SETSTEP, 10, 0);
-    g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
-                       790, 535, 120, 22, IDC_OVERALL, hwnd);
-
     AddCtl(0, L"BUTTON", L"파일명 미리보기", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           8, 586, 1044, 82, 0, hwnd);
+           8, 420, 944, 75, 0, hwnd);
     AddCtl(0, L"STATIC", L"원본:", WS_CHILD | WS_VISIBLE,
-           20, 610, 58, 20, 0, hwnd);
+           20, 443, 58, 20, 0, hwnd);
     g_raw_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                         82, 606, 954, 23, IDC_RAW_TITLE, hwnd);
+                         82, 439, 860, 23, IDC_RAW_TITLE, hwnd);
     AddCtl(0, L"STATIC", L"정리:", WS_CHILD | WS_VISIBLE,
-           20, 639, 58, 20, 0, hwnd);
+           20, 470, 58, 20, 0, hwnd);
     g_clean_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                           82, 635, 954, 23, IDC_CLEAN_TITLE, hwnd);
+                           82, 466, 860, 23, IDC_CLEAN_TITLE, hwnd);
+
+    AddCtl(0, L"BUTTON", L"3. 저장 및 다운로드", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+           8, 501, 944, 112, 0, hwnd);
+    AddCtl(0, L"STATIC", L"저장 폴더:", WS_CHILD | WS_VISIBLE,
+           20, 523, 68, 20, 0, hwnd);
+    g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                           88, 518, 720, 24, IDC_FOLDER_EDIT, hwnd);
+    AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+           816, 517, 126, 26, IDC_FOLDER_BROWSE, hwnd);
+    g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡  |  총 용량: -", WS_CHILD | WS_VISIBLE,
+                            20, 555, 300, 22, IDC_FOLDER_STATS, hwnd);
+    g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
+                        330, 554, 380, 20, IDC_PROGRESS, hwnd);
+    SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                       718, 554, 65, 22, IDC_OVERALL, hwnd);
+    AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+           790, 546, 152, 34, IDC_DOWNLOAD_ALL, hwnd);
 
     g_status = AddCtl(0, STATUSCLASSNAMEW, L"준비 완료", WS_CHILD | WS_VISIBLE,
                       0, 0, 0, 0, IDC_STATUS, hwnd);
+    UpdateStatusBarLayout(hwnd);
     SetDefaultFolder();
-}
-
-static void UpdateOptionFromControl(int id) {
-    HWND h = GetDlgItem(g_main, id);
-    LONG value = (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
-    switch (id) {
-        case IDC_CHK_DEDUP: InterlockedExchange((LONG *)&g_opt_dedup, value); break;
-        case IDC_CHK_SKIP: InterlockedExchange((LONG *)&g_opt_skip, value); break;
-        case IDC_CHK_SANITIZE: InterlockedExchange((LONG *)&g_opt_sanitize, value); RecomputeNames(); break;
-        case IDC_CHK_CLEAN: InterlockedExchange((LONG *)&g_opt_clean, value); RecomputeNames(); break;
-        case IDC_CHK_SIZE: InterlockedExchange((LONG *)&g_opt_size, value); RebuildList(); break;
-    }
 }
 
 static void ClearJobs(void) {
@@ -1810,37 +2040,52 @@ cleanup:
 }
 
 static unsigned __stdcall UpdateCheckThread(void *param) {
-    HWND notify = (HWND)param;
-    UpdateResult *result = (UpdateResult *)calloc(1, sizeof(UpdateResult));
-    if (result && FetchLatestVersion(result->latest, 32)) {
+    UpdateResult *result = (UpdateResult *)param;
+    if (FetchLatestVersion(result->latest, 32)) {
         result->state = CompareSemanticVersion(APP_VERSION_W, result->latest) < 0
             ? UPDATE_AVAILABLE : UPDATE_CURRENT;
+        WriteSettingQword(L"LastSuccessfulUpdateCheck", CurrentFileTimeValue());
     }
     InterlockedExchange((LONG *)&g_update_running, 0);
-    if (!PostMessageW(notify, WM_APP_UPDATE_RESULT, 0, (LPARAM)result)) free(result);
+    if (!PostMessageW(g_main, WM_APP_UPDATE_RESULT, 0, (LPARAM)result)) free(result);
     return 0;
 }
 
-static void StartUpdateCheck(void) {
+static void StartUpdateCheck(BOOL automatic) {
     if (InterlockedCompareExchange((LONG *)&g_update_running, 1, 0) != 0) {
-        MessageBoxW(g_main, L"업데이트를 확인하고 있습니다.", APP_TITLE,
-                    MB_OK | MB_ICONINFORMATION);
+        if (!automatic) {
+            MessageBoxW(g_main, L"업데이트를 확인하고 있습니다.", APP_TITLE,
+                        MB_OK | MB_ICONINFORMATION);
+        }
         return;
     }
+    UpdateResult *result = (UpdateResult *)calloc(1, sizeof(UpdateResult));
+    if (!result) {
+        InterlockedExchange((LONG *)&g_update_running, 0);
+        if (!automatic) {
+            MessageBoxW(g_main, L"업데이트 확인 작업을 준비하지 못했습니다.", APP_TITLE,
+                        MB_OK | MB_ICONERROR);
+        }
+        return;
+    }
+    result->automatic = automatic;
     HMENU menu = GetMenu(g_main);
     EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_GRAYED);
     DrawMenuBar(g_main);
-    SetControlText(g_status, L"상태: 업데이트 확인 중...");
-    uintptr_t thread = _beginthreadex(NULL, 0, UpdateCheckThread, g_main, 0, NULL);
+    if (!automatic) SetControlText(g_status, L"상태: 업데이트 확인 중...");
+    uintptr_t thread = _beginthreadex(NULL, 0, UpdateCheckThread, result, 0, NULL);
     if (thread) {
         CloseHandle((HANDLE)thread);
         return;
     }
+    free(result);
     InterlockedExchange((LONG *)&g_update_running, 0);
     EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_ENABLED);
     DrawMenuBar(g_main);
-    MessageBoxW(g_main, L"업데이트 확인 작업을 시작하지 못했습니다.", APP_TITLE,
-                MB_OK | MB_ICONERROR);
+    if (!automatic) {
+        MessageBoxW(g_main, L"업데이트 확인 작업을 시작하지 못했습니다.", APP_TITLE,
+                    MB_OK | MB_ICONERROR);
+    }
 }
 
 static const wchar_t *StartupStatusText(void) {
@@ -1858,7 +2103,7 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     (void)lParam;
     switch (msg) {
         case WM_CREATE:
-            SetTimer(hwnd, 1, 90, NULL);
+            SetTimer(hwnd, IDT_SPLASH_ANIMATE, 90, NULL);
             return 0;
         case WM_TIMER:
             InterlockedIncrement((LONG *)&g_splash_tick);
@@ -1934,7 +2179,7 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         case WM_CLOSE:
             return 0;
         case WM_DESTROY:
-            KillTimer(hwnd, 1);
+            KillTimer(hwnd, IDT_SPLASH_ANIMATE);
             return 0;
         case WM_NCDESTROY:
             if (g_splash == hwnd) g_splash = NULL;
@@ -1968,7 +2213,7 @@ static void ShowMainAfterSplash(HWND hwnd) {
         ULONGLONG elapsed = GetTickCount64() - g_splash_started;
         if (elapsed < 250) {
             SetStartupPhase(4);
-            SetTimer(hwnd, 2, (UINT)(250 - elapsed), NULL);
+            SetTimer(hwnd, IDT_SHOW_MAIN, (UINT)(250 - elapsed), NULL);
             return;
         }
         DestroyWindow(g_splash);
@@ -2005,21 +2250,63 @@ static void OpenThirdPartyNotices(HWND owner) {
         L"제3자 소프트웨어 고지", MB_OK | MB_ICONINFORMATION);
 }
 
+static void DrawAboutBanner(const DRAWITEMSTRUCT *item) {
+    if (!item || !item->hDC) return;
+    HDC dc = item->hDC;
+    RECT bounds = item->rcItem;
+    HBRUSH background = CreateSolidBrush(RGB(24, 31, 45));
+    HBRUSH accent = CreateSolidBrush(RGB(0, 103, 184));
+    FillRect(dc, &bounds, background);
+
+    RECT mark = { bounds.left + 18, bounds.top + 18,
+                  bounds.left + 78, bounds.bottom - 18 };
+    FillRect(dc, &mark, accent);
+    SetBkMode(dc, TRANSPARENT);
+    HFONT title_font = g_splash_title_font
+        ? g_splash_title_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT body_font = g_splash_body_font
+        ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT old_font = (HFONT)SelectObject(dc, title_font);
+    SetTextColor(dc, RGB(255, 255, 255));
+    DrawTextW(dc, L"S", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+    RECT title = { bounds.left + 96, bounds.top + 17,
+                   bounds.right - 18, bounds.top + 54 };
+    DrawTextW(dc, L"Seowol", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dc, body_font);
+    SetTextColor(dc, RGB(178, 204, 230));
+    RECT product = { bounds.left + 98, bounds.top + 56,
+                     bounds.right - 18, bounds.top + 78 };
+    DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &product, DT_LEFT | DT_SINGLELINE);
+    wchar_t version[96];
+    StringCchPrintfW(version, 96, L"버전 %s  ·  Windows x64", APP_VERSION_W);
+    SetTextColor(dc, RGB(225, 230, 238));
+    RECT version_rect = { bounds.left + 98, bounds.top + 80,
+                          bounds.right - 18, bounds.bottom - 12 };
+    DrawTextW(dc, version, -1, &version_rect, DT_LEFT | DT_SINGLELINE);
+    SelectObject(dc, old_font);
+    DeleteObject(accent);
+    DeleteObject(background);
+}
+
 static INT_PTR CALLBACK AboutDialogProc(HWND dialog, UINT msg, WPARAM wParam, LPARAM lParam) {
-    (void)lParam;
     switch (msg) {
-        case WM_INITDIALOG: {
-            wchar_t version[64];
-            StringCchPrintfW(version, 64, L"버전 %s (64비트)", APP_VERSION_W);
-            SetDlgItemTextW(dialog, IDC_ABOUT_VERSION, version);
-            SendDlgItemMessageW(dialog, IDC_ABOUT_ICON, STM_SETICON,
-                                (WPARAM)LoadIconW(NULL, IDI_INFORMATION), 0);
+        case WM_INITDIALOG:
             CenterDialog(dialog);
             return TRUE;
-        }
+        case WM_DRAWITEM:
+            if ((UINT)wParam == IDC_ABOUT_BANNER) {
+                DrawAboutBanner((const DRAWITEMSTRUCT *)lParam);
+                return TRUE;
+            }
+            break;
         case WM_COMMAND:
             if (LOWORD(wParam) == IDC_ABOUT_LICENSE) {
                 OpenThirdPartyNotices(dialog);
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDC_ABOUT_RELEASES) {
+                OpenWebPage(dialog, RELEASES_URL);
                 return TRUE;
             }
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
@@ -2052,9 +2339,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             switch (id) {
                 case IDC_ADD_LINKS: AddUrlsFromEdit(); break;
                 case IDM_JOB_ADD_LINKS: AddUrlsFromEdit(); break;
-                case IDC_LOAD_TXT: LoadTxtFile(); break;
                 case IDM_FILE_LOAD_TXT: LoadTxtFile(); break;
-                case IDC_REMOVE_DUP:
                 case IDM_JOB_REMOVE_DUP:
                     if (!g_meta_running && !g_download_running) {
                         CompactDuplicates();
@@ -2063,35 +2348,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     break;
                 case IDC_FOLDER_BROWSE: BrowseFolder(); break;
                 case IDM_FILE_BROWSE_FOLDER: BrowseFolder(); break;
-                case IDC_FOLDER_OPEN: OpenFolder(); break;
                 case IDM_FILE_OPEN_FOLDER: OpenFolder(); break;
                 case IDC_DOWNLOAD_ALL: StartDownload(FALSE); break;
                 case IDM_JOB_DOWNLOAD_ALL: StartDownload(FALSE); break;
-                case IDC_RETRY_FAILED: StartDownload(TRUE); break;
                 case IDM_JOB_RETRY_FAILED: StartDownload(TRUE); break;
-                case IDC_DELETE_SELECTED: DeleteSelected(); break;
+                case IDM_JOB_DELETE_SELECTED: DeleteSelected(); break;
                 case IDM_JOB_CLEAR: ClearJobs(); break;
                 case IDM_TOOLS_REFRESH_STATS: UpdateFolderStatsUI(); break;
                 case IDM_TOOLS_OPEN_HISTORY: OpenHistoryFile(); break;
-                case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(); break;
+                case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(FALSE); break;
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
-                case IDC_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
-                case IDC_CHK_DEDUP:
-                case IDC_CHK_SKIP:
-                case IDC_CHK_SANITIZE:
-                case IDC_CHK_CLEAN:
-                case IDC_CHK_SIZE:
-                    UpdateOptionFromControl(id);
-                    break;
+                case IDM_OPT_DEDUP:
+                case IDM_OPT_SKIP:
+                case IDM_OPT_SANITIZE:
+                case IDM_OPT_CLEAN:
+                case IDM_OPT_SIZE:
+                case IDM_OPT_AUTO_UPDATE: ToggleBooleanOption(id); break;
+                case IDM_QUALITY_128: SetAudioBitrate(128); break;
+                case IDM_QUALITY_192: SetAudioBitrate(192); break;
+                case IDM_QUALITY_256: SetAudioBitrate(256); break;
+                case IDM_QUALITY_320: SetAudioBitrate(320); break;
             }
             return 0;
         }
 
         case WM_NOTIFY: {
             NMHDR *hdr = (NMHDR *)lParam;
-            if (hdr->idFrom == IDC_LIST && hdr->code == LVN_ITEMCHANGED) UpdatePreviewFromSelection();
+            if (hdr->idFrom == IDC_LIST && hdr->code == LVN_ITEMCHANGED) {
+                UpdatePreviewFromSelection();
+            } else if (hdr->idFrom == IDC_LIST && hdr->code == LVN_KEYDOWN &&
+                       ((NMLVKEYDOWN *)lParam)->wVKey == VK_DELETE) {
+                DeleteSelected();
+            }
             return 0;
         }
 
@@ -2156,6 +2446,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_APP_UPDATE_RESULT: {
             UpdateResult *update = (UpdateResult *)lParam;
+            BOOL automatic = update ? update->automatic : FALSE;
             HMENU menu = GetMenu(hwnd);
             EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_ENABLED);
             DrawMenuBar(hwnd);
@@ -2173,12 +2464,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         L"https://github.com/NokMyo/youtube-dl/releases/tag/v%s", update->latest);
                     OpenWebPage(hwnd, url);
                 }
-            } else if (update && update->state == UPDATE_CURRENT) {
+            } else if (update && update->state == UPDATE_CURRENT && !automatic) {
                 wchar_t message[160];
                 StringCchPrintfW(message, 160,
                     L"현재 최신 버전을 사용하고 있습니다.\r\n\r\n버전 %s", APP_VERSION_W);
                 MessageBoxW(hwnd, message, L"업데이트 확인", MB_OK | MB_ICONINFORMATION);
-            } else {
+            } else if ((!update || update->state == UPDATE_ERROR) && !automatic) {
                 if (MessageBoxW(hwnd,
                     L"업데이트 정보를 가져오지 못했습니다.\r\n\r\n"
                     L"GitHub 릴리스 페이지에서 직접 확인하시겠습니까?",
@@ -2187,7 +2478,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             free(update);
-            if (!g_meta_running && !g_download_running) SetControlText(g_status, L"준비 완료");
+            if (!automatic && !g_meta_running && !g_download_running) {
+                SetControlText(g_status, L"준비 완료");
+            }
             return 0;
         }
 
@@ -2195,17 +2488,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetControlText(g_status, wParam ? L"준비 완료" : L"상태: yt-dlp 또는 ffmpeg를 찾을 수 없음");
             SetStartupPhase(4);
             ShowMainAfterSplash(hwnd);
+            if (ShouldCheckUpdatesAutomatically()) SetTimer(hwnd, IDT_AUTO_UPDATE, 1500, NULL);
             return 0;
 
         case WM_TIMER:
-            if (wParam == 2) {
-                KillTimer(hwnd, 2);
+            if (wParam == IDT_SHOW_MAIN) {
+                KillTimer(hwnd, IDT_SHOW_MAIN);
                 ShowMainAfterSplash(hwnd);
+            } else if (wParam == IDT_AUTO_UPDATE) {
+                KillTimer(hwnd, IDT_AUTO_UPDATE);
+                StartUpdateCheck(TRUE);
             }
             return 0;
 
         case WM_SIZE:
-            if (g_status) SendMessageW(g_status, WM_SIZE, 0, 0);
+            UpdateStatusBarLayout(hwnd);
             return 0;
 
         case WM_CLOSE:
@@ -2272,6 +2569,12 @@ static BOOL RunCoreSelfTests(void) {
     wchar_t release_version[32];
     if (!ExtractReleaseTag("{\"tag_name\":\"v1.1.0\"}", release_version, 32) ||
         wcscmp(release_version, L"1.1.0")) return FALSE;
+    if (EstimatedMp3Bytes(180000, 320) != 7200000ULL ||
+        EstimatedMp3Bytes(180000, 128) != 2880000ULL ||
+        EstimatedMp3Bytes(0, 320) != 0 ||
+        !IsSupportedBitrate(128) || !IsSupportedBitrate(192) ||
+        !IsSupportedBitrate(256) || !IsSupportedBitrate(320) ||
+        IsSupportedBitrate(96)) return FALSE;
     return TRUE;
 }
 
@@ -2300,6 +2603,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         result = ok ? 0 : 2;
         goto cleanup;
     }
+
+    LoadSettings();
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);

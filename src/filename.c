@@ -184,10 +184,15 @@ void Filename_BuildClean(const wchar_t *raw_title,
                 middle[middle_length] = 0;
                 Trim(left);
                 Trim(middle);
-                while (*left && (left[wcslen(left) - 1] == L'-' ||
-                       left[wcslen(left) - 1] == L'–' || left[wcslen(left) - 1] == L'—')) {
-                    left[wcslen(left) - 1] = 0;
-                    Trim(left);
+                size_t trimmed_left_length = wcslen(left);
+                while (trimmed_left_length &&
+                       (left[trimmed_left_length - 1] == L'-' ||
+                        left[trimmed_left_length - 1] == L'–' ||
+                        left[trimmed_left_length - 1] == L'—')) {
+                    left[--trimmed_left_length] = 0;
+                    while (trimmed_left_length && iswspace(left[trimmed_left_length - 1])) {
+                        left[--trimmed_left_length] = 0;
+                    }
                 }
                 if (*left && *middle) StringCchPrintfW(base, 1024, L"%s - %s", left, middle);
             }
@@ -213,10 +218,10 @@ void Filename_BuildClean(const wchar_t *raw_title,
         if (base[i] == L'–' || base[i] == L'—') base[i] = L'-';
     }
     CollapseSpaces(base);
-    while (*base && (base[wcslen(base) - 1] == L'-' ||
-           base[wcslen(base) - 1] == L'_' || base[wcslen(base) - 1] == L' ')) {
-        base[wcslen(base) - 1] = 0;
-        Trim(base);
+    size_t base_length = wcslen(base);
+    while (base_length && (base[base_length - 1] == L'-' ||
+           base[base_length - 1] == L'_' || iswspace(base[base_length - 1]))) {
+        base[--base_length] = 0;
     }
     if (!*base) StringCchCopyW(base, 1024, L"untitled");
     if (sanitize) Filename_Sanitize(base, 1024);

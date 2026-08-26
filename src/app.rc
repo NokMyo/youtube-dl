@@ -4,21 +4,23 @@
 #include "resource.h"
 #include "version.h"
 
-IDD_ABOUT DIALOGEX 0, 0, 315, 205
+IDD_ABOUT DIALOGEX 0, 0, 390, 250
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Seowol YT MP3 Downloader 정보"
 FONT 9, "굴림"
 BEGIN
-    CONTROL         "", IDC_ABOUT_ICON, "STATIC", SS_ICON | WS_CHILD | WS_VISIBLE, 14, 15, 24, 24
-    LTEXT           "Seowol YT MP3 Downloader", -1, 47, 14, 238, 13
-    LTEXT           "버전", IDC_ABOUT_VERSION, 47, 31, 238, 11
-    LTEXT           "YouTube 링크를 MP3 파일로 정리하는 Windows 프로그램", -1, 47, 47, 245, 18
-    GROUPBOX        "저작권 및 라이선스", -1, 12, 72, 291, 87
-    LTEXT           "Copyright © 2026 NokMyo. All rights reserved.", -1, 23, 90, 268, 12
-    LTEXT           "프로그램 자체 코드는 저작권자의 독점 소프트웨어입니다. 외부 구성 요소에는 각 프로젝트의 오픈소스 라이선스가 적용됩니다.", -1, 23, 107, 268, 29
-    LTEXT           "yt-dlp 실행 파일: GPL v3 이상   |   FFmpeg Essentials: GPL v3", -1, 23, 140, 268, 11
-    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 118, 171, 91, 23
-    DEFPUSHBUTTON   "확인", IDOK, 218, 171, 74, 23
+    CONTROL         "", IDC_ABOUT_BANNER, "STATIC", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 390, 63
+    GROUPBOX        "제품 정보", -1, 12, 72, 366, 64
+    LTEXT           "개발 및 저작권", -1, 23, 89, 88, 11
+    LTEXT           "NokMyo  |  Copyright © 2026 NokMyo. All rights reserved.", -1, 119, 89, 246, 11
+    LTEXT           "라이선스", -1, 23, 106, 88, 11
+    LTEXT           "독점 소프트웨어 · 외부 구성 요소는 각 오픈소스 라이선스 적용", -1, 119, 106, 246, 20
+    GROUPBOX        "포함된 구성 요소", -1, 12, 143, 366, 53
+    LTEXT           "yt-dlp Windows 실행 파일 — GNU GPL v3 이상", -1, 23, 160, 342, 11
+    LTEXT           "FFmpeg Essentials Build — GNU GPL v3", -1, 23, 176, 342, 11
+    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 105, 211, 92, 25
+    PUSHBUTTON      "릴리스 정보", IDC_ABOUT_RELEASES, 204, 211, 78, 25
+    DEFPUSHBUTTON   "확인", IDOK, 289, 211, 78, 25
 END
 
 VS_VERSION_INFO VERSIONINFO
