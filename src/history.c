@@ -122,7 +122,7 @@ static void RewriteV2Unlocked(const wchar_t *path) {
     if (!path || FAILED(StringCchPrintfW(temporary, MAX_PATH, L"%s.tmp", path))) return;
     FILE *file = _wfopen(temporary, L"wb");
     if (!file) return;
-    BOOL success = fputs("# Febius download history v2\r\n", file) >= 0;
+    BOOL success = fputs("# Febius Downrush download history v2\r\n", file) >= 0;
     for (size_t i = 0; success && i < HISTORY_BUCKETS; ++i) {
         for (HistoryEntry *entry = g_entries[i]; entry; entry = entry->next) {
             char id_utf8[512], filename_utf8[1024];
@@ -215,7 +215,7 @@ BOOL History_Record(const wchar_t *folder,
                         (!attributes.nFileSizeHigh && !attributes.nFileSizeLow);
         FILE *file = _wfopen(path, L"ab");
         if (file) {
-            if (new_file) fputs("# Febius download history v2\r\n", file);
+            if (new_file) fputs("# Febius Downrush download history v2\r\n", file);
             char id_utf8[512], filename_utf8[1024];
             int id_bytes = WideCharToMultiByte(CP_UTF8, 0, video_id, -1,
                                                id_utf8, (int)sizeof(id_utf8), NULL, NULL);

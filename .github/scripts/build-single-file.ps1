@@ -1,6 +1,6 @@
 param(
-  [string]$CoreExe = 'build/Release/FebiusYTMP3Downloader.exe',
-  [string]$OutputExe = 'FebiusYTMP3Downloader.exe'
+  [string]$CoreExe = 'build/Release/FebiusDownrush.exe',
+  [string]$OutputExe = 'FebiusDownrush.exe'
 )
 
 $ErrorActionPreference = 'Stop'

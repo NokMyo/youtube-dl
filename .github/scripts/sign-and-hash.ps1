@@ -1,4 +1,4 @@
-param([string]$Exe = 'FebiusYTMP3Downloader.exe')
+param([string]$Exe = 'FebiusDownrush.exe')
 
 $ErrorActionPreference = 'Stop'
 $certificateBase64 = $env:WINDOWS_CERTIFICATE_BASE64

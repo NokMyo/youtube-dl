@@ -7,9 +7,13 @@
 1 RT_MANIFEST "app.manifest"
 IDI_APP_ICON ICON "app.ico"
 
+/* Febius 브랜드 심볼 자리입니다. src/febius-symbol.ico를 추가한 뒤 아래 줄을 활성화합니다.
+IDI_FEBIUS_SYMBOL ICON "febius-symbol.ico"
+*/
+
 IDD_ABOUT DIALOGEX 0, 0, 390, 265
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Febius YT MP3 Downloader 정보"
+CAPTION "Febius Downrush 정보"
 FONT 9, "굴림"
 BEGIN
     CONTROL         "", IDC_ABOUT_BANNER, "STATIC", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 390, 63
@@ -46,12 +50,12 @@ BEGIN
         BLOCK "041204B0"
         BEGIN
             VALUE "CompanyName", "Febius\0"
-            VALUE "FileDescription", "Febius YT MP3 Downloader\0"
+            VALUE "FileDescription", "Febius Downrush\0"
             VALUE "FileVersion", APP_VERSION_TEXT "\0"
-            VALUE "InternalName", "FebiusYTMP3Downloader\0"
+            VALUE "InternalName", "FebiusDownrush\0"
             VALUE "LegalCopyright", APP_COPYRIGHT_TEXT "\0"
-            VALUE "OriginalFilename", "FebiusYTMP3Downloader.exe\0"
-            VALUE "ProductName", "Febius YT MP3 Downloader\0"
+            VALUE "OriginalFilename", "FebiusDownrush.exe\0"
+            VALUE "ProductName", "Febius Downrush\0"
             VALUE "ProductVersion", APP_VERSION_TEXT "\0"
         END
     END

@@ -76,7 +76,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not read the FFmpeg license information.
 $ffmpegLicense | Set-Content -Encoding UTF8 'payload/FFMPEG-LICENSE.txt'
 
 @(
-  'Febius YT MP3 Downloader - Third-Party Notices',
+  'Febius Downrush - Third-Party Notices',
   '',
   'The following command-line programs are distributed alongside the application',
   'and are launched as separate processes:',

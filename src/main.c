@@ -29,7 +29,8 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "advapi32.lib")
 
-#define APP_TITLE L"Febius YT MP3 Downloader"
+#define APP_TITLE L"Febius Downrush"
+#define APP_TAGLINE L"FAST · DIRECT · EFFICIENT"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
 #define CLEAN_NAME_CCH 256
@@ -235,13 +236,35 @@ static HANDLE g_instance_mutex;
 static int g_main_show_command = SW_SHOWNORMAL;
 static ULONGLONG g_splash_started = 0;
 static UINT g_ui_dpi = 96;
+static DWORD g_processor_count = 1;
 
 static const wchar_t *RELEASES_URL = L"https://github.com/NokMyo/youtube-dl/releases";
-static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\FebiusYTMP3Downloader";
-static const wchar_t *LEGACY_SETTINGS_KEY = L"Software\\NokMyo\\SeowolYTMP3Downloader";
+static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\Febius\\Downrush";
+static const wchar_t *LEGACY_SETTINGS_KEYS[] = {
+    L"Software\\NokMyo\\FebiusYTMP3Downloader",
+    L"Software\\NokMyo\\SeowolYTMP3Downloader"
+};
 
 static int ScaleUi(int value) {
     return MulDiv(value, (int)g_ui_dpi, 96);
+}
+
+static int MetadataWorkerLimitFor(DWORD processor_count) {
+    if (processor_count <= 2) return 1;
+    if (processor_count <= 4) return 2;
+    return META_WORKER_COUNT;
+}
+
+static int DownloadWorkerLimitFor(DWORD processor_count) {
+    return processor_count <= 2 ? 1 : DOWNLOAD_WORKER_COUNT;
+}
+
+static int MetadataWorkerLimit(void) {
+    return MetadataWorkerLimitFor(g_processor_count);
+}
+
+static int DownloadWorkerLimit(void) {
+    return DownloadWorkerLimitFor(g_processor_count);
 }
 
 static BOOL IsSupportedBitrate(DWORD value) {
@@ -272,16 +295,23 @@ static void MigrateLegacySettings(void) {
         return;
     }
 
-    HKEY legacy = NULL, destination = NULL;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, LEGACY_SETTINGS_KEY, 0, KEY_READ, &legacy) != ERROR_SUCCESS) return;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0,
-                        KEY_WRITE, NULL, &destination, NULL) == ERROR_SUCCESS) {
-        if (RegCopyTreeW(legacy, NULL, destination) == ERROR_SUCCESS) {
-            Logger_Write(L"migration", L"Seowol 설정을 Febius 설정으로 이전했습니다.");
+    for (size_t i = 0; i < sizeof(LEGACY_SETTINGS_KEYS) / sizeof(LEGACY_SETTINGS_KEYS[0]); ++i) {
+        HKEY legacy = NULL, destination = NULL;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, LEGACY_SETTINGS_KEYS[i], 0,
+                          KEY_READ, &legacy) != ERROR_SUCCESS) continue;
+        LONG copied = ERROR_GEN_FAILURE;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0,
+                            KEY_WRITE, NULL, &destination, NULL) == ERROR_SUCCESS) {
+            copied = RegCopyTreeW(legacy, NULL, destination);
+            RegCloseKey(destination);
         }
-        RegCloseKey(destination);
+        RegCloseKey(legacy);
+        if (copied == ERROR_SUCCESS) {
+            Logger_Write(L"migration", L"기존 설정을 Febius\\Downrush 설정으로 이전했습니다.");
+            return;
+        }
+        RegDeleteTreeW(HKEY_CURRENT_USER, SETTINGS_KEY);
     }
-    RegCloseKey(legacy);
 }
 
 static void WriteSettingValue(const wchar_t *name, DWORD type,
@@ -378,6 +408,23 @@ static BOOL DirectoryExistsW2(const wchar_t *path) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static BOOL PathsEqualIgnoringTrailingSeparators(const wchar_t *left,
+                                                  const wchar_t *right) {
+    if (!left || !right) return FALSE;
+    size_t left_length = wcslen(left);
+    size_t right_length = wcslen(right);
+    while (left_length > 3 &&
+           (left[left_length - 1] == L'\\' || left[left_length - 1] == L'/')) {
+        --left_length;
+    }
+    while (right_length > 3 &&
+           (right[right_length - 1] == L'\\' || right[right_length - 1] == L'/')) {
+        --right_length;
+    }
+    return left_length == right_length &&
+           !_wcsnicmp(left, right, left_length);
+}
+
 static void GetAppDirectory(wchar_t *out, size_t cch) {
     DWORD n = GetModuleFileNameW(NULL, out, (DWORD)cch);
     if (!n || n >= cch) {
@@ -388,30 +435,132 @@ static void GetAppDirectory(wchar_t *out, size_t cch) {
     if (slash) *slash = L'\0';
 }
 
+static void MoveLegacyFileIfNeeded(const wchar_t *source, const wchar_t *destination) {
+    if (!source || !destination || FileExistsW2(destination) || !FileExistsW2(source)) return;
+    MoveFileExW(source, destination, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+}
+
 static BOOL InitializeAppDataPaths(void) {
     wchar_t local[MAX_PATH];
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE,
                                 NULL, SHGFP_TYPE_CURRENT, local))) return FALSE;
-    if (FAILED(StringCchPrintfW(g_local_app_dir, MAX_PATH,
-                                L"%s\\FebiusYTMP3Downloader", local))) return FALSE;
+    wchar_t brand_dir[MAX_PATH];
+    if (FAILED(StringCchPrintfW(brand_dir, MAX_PATH, L"%s\\Febius", local)) ||
+        FAILED(StringCchPrintfW(g_local_app_dir, MAX_PATH,
+                                L"%s\\Febius\\Downrush", local))) return FALSE;
+    if (SHCreateDirectoryExW(NULL, brand_dir, NULL) != ERROR_SUCCESS &&
+        !DirectoryExistsW2(brand_dir)) return FALSE;
 
-    wchar_t legacy[MAX_PATH] = L"";
-    if (SUCCEEDED(StringCchPrintfW(legacy, MAX_PATH,
-                                   L"%s\\SeowolYTMP3Downloader", local)) &&
-        !DirectoryExistsW2(g_local_app_dir) && DirectoryExistsW2(legacy)) {
-        MoveFileExW(legacy, g_local_app_dir, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+    const wchar_t *legacy_names[] = { L"FebiusYTMP3Downloader", L"SeowolYTMP3Downloader" };
+    wchar_t legacy_paths[2][MAX_PATH];
+    ZeroMemory(legacy_paths, sizeof(legacy_paths));
+    for (size_t i = 0; i < sizeof(legacy_names) / sizeof(legacy_names[0]); ++i) {
+        if (FAILED(StringCchPrintfW(legacy_paths[i], MAX_PATH,
+                                    L"%s\\%s", local, legacy_names[i]))) continue;
+        if (!DirectoryExistsW2(g_local_app_dir) && DirectoryExistsW2(legacy_paths[i])) {
+            MoveFileExW(legacy_paths[i], g_local_app_dir,
+                        MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+        }
     }
     if (SHCreateDirectoryExW(NULL, g_local_app_dir, NULL) != ERROR_SUCCESS &&
         !DirectoryExistsW2(g_local_app_dir)) return FALSE;
 
-    wchar_t legacy_tools[MAX_PATH], current_tools[MAX_PATH];
-    if (legacy[0] && SUCCEEDED(StringCchPrintfW(legacy_tools, MAX_PATH, L"%s\\tools", legacy)) &&
-        SUCCEEDED(StringCchPrintfW(current_tools, MAX_PATH, L"%s\\tools", g_local_app_dir)) &&
-        !DirectoryExistsW2(current_tools) && DirectoryExistsW2(legacy_tools)) {
-        MoveFileExW(legacy_tools, current_tools, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
-        RemoveDirectoryW(legacy);
+    wchar_t current_tools[MAX_PATH], current_logs[MAX_PATH], downrush_log[MAX_PATH];
+    wchar_t downrush_old_log[MAX_PATH];
+    if (FAILED(StringCchPrintfW(current_tools, MAX_PATH, L"%s\\tools", g_local_app_dir)) ||
+        FAILED(StringCchPrintfW(current_logs, MAX_PATH, L"%s\\logs", g_local_app_dir)) ||
+        FAILED(StringCchPrintfW(downrush_log, MAX_PATH, L"%s\\Downrush.log", current_logs)) ||
+        FAILED(StringCchPrintfW(downrush_old_log, MAX_PATH,
+                                L"%s\\Downrush.log.old", current_logs))) {
+        return FALSE;
+    }
+    SHCreateDirectoryExW(NULL, current_logs, NULL);
+
+    wchar_t old_log[MAX_PATH], old_rotated_log[MAX_PATH];
+    if (SUCCEEDED(StringCchPrintfW(old_log, MAX_PATH, L"%s\\Febius.log", current_logs))) {
+        MoveLegacyFileIfNeeded(old_log, downrush_log);
+    }
+    if (SUCCEEDED(StringCchPrintfW(old_rotated_log, MAX_PATH,
+                                   L"%s\\Febius.log.old", current_logs))) {
+        MoveLegacyFileIfNeeded(old_rotated_log, downrush_old_log);
+    }
+    for (size_t i = 0; i < sizeof(legacy_paths) / sizeof(legacy_paths[0]); ++i) {
+        if (!legacy_paths[i][0] || !DirectoryExistsW2(legacy_paths[i])) continue;
+        wchar_t legacy_tools[MAX_PATH], legacy_log[MAX_PATH], legacy_rotated_log[MAX_PATH];
+        if (!DirectoryExistsW2(current_tools) &&
+            SUCCEEDED(StringCchPrintfW(legacy_tools, MAX_PATH, L"%s\\tools", legacy_paths[i])) &&
+            DirectoryExistsW2(legacy_tools)) {
+            MoveFileExW(legacy_tools, current_tools,
+                        MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+        }
+        if (SUCCEEDED(StringCchPrintfW(legacy_log, MAX_PATH,
+                                       L"%s\\logs\\Febius.log", legacy_paths[i]))) {
+            MoveLegacyFileIfNeeded(legacy_log, downrush_log);
+        }
+        if (SUCCEEDED(StringCchPrintfW(legacy_rotated_log, MAX_PATH,
+                                       L"%s\\logs\\Febius.log.old", legacy_paths[i]))) {
+            MoveLegacyFileIfNeeded(legacy_rotated_log, downrush_old_log);
+        }
     }
     return TRUE;
+}
+
+static BOOL GetDefaultOutputFolder(wchar_t *out, size_t cch) {
+    wchar_t music[MAX_PATH];
+    if (!out || !cch || FAILED(SHGetFolderPathW(NULL,
+            CSIDL_MYMUSIC | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, music))) return FALSE;
+    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\Febius\\Downrush", music));
+}
+
+static BOOL GetLegacyDefaultOutputFolder(wchar_t *out, size_t cch) {
+    wchar_t music[MAX_PATH];
+    if (!out || !cch || FAILED(SHGetFolderPathW(NULL,
+            CSIDL_MYMUSIC | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, music))) return FALSE;
+    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\YouTubeMP3", music));
+}
+
+static void MigrateLegacyDefaultOutputFolder(void) {
+    wchar_t legacy[MAX_PATH], current[MAX_PATH];
+    if (!GetLegacyDefaultOutputFolder(legacy, MAX_PATH) ||
+        !GetDefaultOutputFolder(current, MAX_PATH)) return;
+    if (g_saved_folder[0] &&
+        !PathsEqualIgnoringTrailingSeparators(g_saved_folder, legacy)) return;
+
+    BOOL legacy_exists = DirectoryExistsW2(legacy);
+    BOOL current_exists = DirectoryExistsW2(current);
+    if (legacy_exists && !current_exists) {
+        wchar_t brand_folder[MAX_PATH];
+        StringCchCopyW(brand_folder, MAX_PATH, current);
+        wchar_t *slash = wcsrchr(brand_folder, L'\\');
+        if (slash) *slash = 0;
+        if (slash && (SHCreateDirectoryExW(NULL, brand_folder, NULL) == ERROR_SUCCESS ||
+                      DirectoryExistsW2(brand_folder))) {
+            MoveFileExW(legacy, current, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+            current_exists = DirectoryExistsW2(current);
+            if (current_exists) {
+                legacy_exists = DirectoryExistsW2(legacy);
+                Logger_Write(L"migration", L"기본 음악 폴더를 Music\\Febius\\Downrush로 이전했습니다.");
+            }
+        }
+    }
+
+    if (!legacy_exists && !current_exists) {
+        SHCreateDirectoryExW(NULL, current, NULL);
+        current_exists = DirectoryExistsW2(current);
+    }
+
+    if (current_exists) {
+        if (legacy_exists) {
+            Logger_Write(L"migration",
+                L"새 기본 음악 폴더가 이미 있어 기존 Music\\YouTubeMP3 폴더는 보존했습니다.");
+        }
+        StringCchCopyW(g_saved_folder, MAX_PATH, current);
+        WriteSettingString(L"OutputFolder", current);
+    } else if (legacy_exists) {
+        StringCchCopyW(g_saved_folder, MAX_PATH, legacy);
+        WriteSettingString(L"OutputFolder", legacy);
+        Logger_Write(L"migration", L"기존 음악 폴더 이전에 실패해 원래 경로를 유지합니다.");
+    }
 }
 
 static void SetStartupPhase(LONG phase) {
@@ -1007,6 +1156,7 @@ static void GetFolderStats(const wchar_t *folder, int *count, ULONGLONG *bytes) 
 }
 
 static unsigned __stdcall FolderStatsThread(void *param) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     FolderStatsResult *result = (FolderStatsResult *)param;
     GetFolderStats(result->folder, &result->count, &result->bytes);
     if (!PostMessageW(g_main, WM_APP_FOLDER_STATS, 0, (LPARAM)result)) free(result);
@@ -1231,7 +1381,8 @@ static unsigned __stdcall MetadataThread(void *param) {
     HANDLE workers[META_WORKER_COUNT - 1];
     DWORD worker_count = 0;
     int job_count = work.end - (int)work.next;
-    int child_count = job_count < META_WORKER_COUNT ? job_count - 1 : META_WORKER_COUNT - 1;
+    int worker_limit = MetadataWorkerLimit();
+    int child_count = job_count < worker_limit ? job_count - 1 : worker_limit - 1;
     for (int i = 0; i < child_count; ++i) {
         uintptr_t thread = _beginthreadex(NULL, 0, MetadataWorker, &work, 0, NULL);
         if (thread) workers[worker_count++] = (HANDLE)thread;
@@ -1462,7 +1613,7 @@ static BOOL GetTempRoot(wchar_t *out, size_t cch) {
     wchar_t system_temp[MAX_PATH];
     DWORD length = GetTempPathW(MAX_PATH, system_temp);
     if (!length || length >= MAX_PATH ||
-        FAILED(StringCchPrintfW(out, cch, L"%sFebiusYTMP3Downloader", system_temp))) return FALSE;
+        FAILED(StringCchPrintfW(out, cch, L"%sFebius\\Downrush", system_temp))) return FALSE;
     return SHCreateDirectoryExW(NULL, out, NULL) == ERROR_SUCCESS || DirectoryExistsW2(out);
 }
 
@@ -1502,9 +1653,9 @@ static BOOL CreateBatchTempDirectory(wchar_t *out, size_t cch) {
     return FALSE;
 }
 
-static void CleanupOrphanTempDirectories(void) {
-    wchar_t root[MAX_PATH], pattern[MAX_PATH];
-    if (!GetTempRoot(root, MAX_PATH) ||
+static void CleanupOrphanTempRoot(const wchar_t *root) {
+    wchar_t pattern[MAX_PATH];
+    if (!root || !*root || !DirectoryExistsW2(root) ||
         FAILED(StringCchPrintfW(pattern, MAX_PATH, L"%s\\batch-*", root))) return;
     FILETIME now_file_time;
     GetSystemTimeAsFileTime(&now_file_time);
@@ -1514,7 +1665,10 @@ static void CleanupOrphanTempDirectories(void) {
     const ULONGLONG one_day = 24ULL * 60ULL * 60ULL * 10000000ULL;
     WIN32_FIND_DATAW data;
     HANDLE find = FindFirstFileW(pattern, &data);
-    if (find == INVALID_HANDLE_VALUE) return;
+    if (find == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(root);
+        return;
+    }
     do {
         if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
             (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
@@ -1529,6 +1683,20 @@ static void CleanupOrphanTempDirectories(void) {
         }
     } while (FindNextFileW(find, &data));
     FindClose(find);
+    RemoveDirectoryW(root);
+}
+
+static void CleanupOrphanTempDirectories(void) {
+    wchar_t root[MAX_PATH];
+    if (GetTempRoot(root, MAX_PATH)) CleanupOrphanTempRoot(root);
+
+    wchar_t system_temp[MAX_PATH], legacy[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, system_temp);
+    if (length && length < MAX_PATH &&
+        SUCCEEDED(StringCchPrintfW(legacy, MAX_PATH,
+                                   L"%sFebiusYTMP3Downloader", system_temp))) {
+        CleanupOrphanTempRoot(legacy);
+    }
 }
 
 static void DownloadLineCallbackFn(const char *line, void *ctx) {
@@ -1755,7 +1923,8 @@ static unsigned __stdcall DownloadThread(void *param) {
     PostMessageW(g_main, WM_APP_OVERALL, 0, work.total);
     HANDLE workers[DOWNLOAD_WORKER_COUNT - 1];
     DWORD worker_count = 0;
-    int active_workers = work.total < DOWNLOAD_WORKER_COUNT ? work.total : DOWNLOAD_WORKER_COUNT;
+    int worker_limit = DownloadWorkerLimit();
+    int active_workers = work.total < worker_limit ? work.total : worker_limit;
     int child_count = active_workers > 0 ? active_workers - 1 : 0;
     for (int i = 0; i < child_count; ++i) {
         uintptr_t thread = _beginthreadex(NULL, 0, DownloadWorker, &work, 0, NULL);
@@ -1897,14 +2066,12 @@ static void SetDefaultFolder(void) {
         UpdateFolderStatsUI();
         return;
     }
-    wchar_t music[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYMUSIC | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, music))) {
-        wchar_t folder[MAX_PATH];
-        StringCchPrintfW(folder, MAX_PATH, L"%s\\YouTubeMP3", music);
+    wchar_t folder[MAX_PATH];
+    if (GetDefaultOutputFolder(folder, MAX_PATH)) {
         SHCreateDirectoryExW(g_main, folder, NULL);
         SetWindowTextW(g_folder_edit, folder);
     } else {
-        SetWindowTextW(g_folder_edit, L"C:\\Music\\YouTubeMP3");
+        SetWindowTextW(g_folder_edit, L"C:\\Music\\Febius\\Downrush");
     }
     UpdateFolderStatsUI();
 }
@@ -2211,7 +2378,7 @@ static BOOL FetchLatestVersion(wchar_t *version, size_t cch) {
     BOOL ok = FALSE;
     HINTERNET session = NULL, connection = NULL, request = NULL;
     wchar_t user_agent[96];
-    StringCchPrintfW(user_agent, 96, L"FebiusYTMP3Downloader/%s", APP_VERSION_W);
+    StringCchPrintfW(user_agent, 96, L"FebiusDownrush/%s", APP_VERSION_W);
 
     session = WinHttpOpen(user_agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -2356,12 +2523,12 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             DrawTextW(dc, L"Febius", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SelectObject(dc, body_font);
             RECT subtitle = {ScaleUi(26), ScaleUi(51), client.right - ScaleUi(20), ScaleUi(76)};
-            DrawTextW(dc, L"UTILITY SERIES", -1, &subtitle, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, APP_TAGLINE, -1, &subtitle, DT_LEFT | DT_SINGLELINE);
 
             SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
             wchar_t version_text[64];
             RECT product = {ScaleUi(24), ScaleUi(103), client.right - ScaleUi(24), ScaleUi(124)};
-            DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &product, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, L"DOWNRUSH  ·  YOUTUBE TO MP3", -1, &product, DT_LEFT | DT_SINGLELINE);
             StringCchPrintfW(version_text, 64, L"Version %s  ·  Windows x64", APP_VERSION_W);
             RECT version = {ScaleUi(24), ScaleUi(130), client.right - ScaleUi(24), ScaleUi(151)};
             DrawTextW(dc, version_text, -1, &version, DT_LEFT | DT_SINGLELINE);
@@ -2417,7 +2584,7 @@ static BOOL CreateSplashWindow(void) {
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
     g_splash = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        L"FebiusYTMP3SplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
+        L"FebiusDownrushSplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
         x, y, width, height, NULL, NULL, g_instance, NULL);
     if (!g_splash) return FALSE;
     g_splash_started = GetTickCount64();
@@ -2487,7 +2654,15 @@ static void DrawAboutBanner(const DRAWITEMSTRUCT *item) {
         ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HFONT old_font = (HFONT)SelectObject(dc, title_font);
     SetTextColor(dc, RGB(255, 255, 255));
-    DrawTextW(dc, L"F", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    HICON brand_symbol = (HICON)LoadImageW(g_instance,
+        MAKEINTRESOURCEW(IDI_FEBIUS_SYMBOL), IMAGE_ICON, 48, 48, LR_DEFAULTCOLOR);
+    if (brand_symbol) {
+        int icon_x = mark.left + ((mark.right - mark.left) - 48) / 2;
+        int icon_y = mark.top + ((mark.bottom - mark.top) - 48) / 2;
+        DrawIconEx(dc, icon_x, icon_y, brand_symbol, 48, 48, 0, NULL, DI_NORMAL);
+    } else {
+        DrawTextW(dc, L"F", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    }
 
     RECT title = { bounds.left + 96, bounds.top + 17,
                    bounds.right - 18, bounds.top + 54 };
@@ -2496,14 +2671,15 @@ static void DrawAboutBanner(const DRAWITEMSTRUCT *item) {
     SetTextColor(dc, RGB(178, 204, 230));
     RECT product = { bounds.left + 98, bounds.top + 56,
                      bounds.right - 18, bounds.top + 78 };
-    DrawTextW(dc, L"UTILITY SERIES", -1, &product, DT_LEFT | DT_SINGLELINE);
+    DrawTextW(dc, APP_TAGLINE, -1, &product, DT_LEFT | DT_SINGLELINE);
     wchar_t version[96];
-    StringCchPrintfW(version, 96, L"YT MP3 DOWNLOADER  ·  Version %s  ·  Windows x64", APP_VERSION_W);
+    StringCchPrintfW(version, 96, L"DOWNRUSH  ·  Version %s  ·  Windows x64", APP_VERSION_W);
     SetTextColor(dc, RGB(225, 230, 238));
     RECT version_rect = { bounds.left + 98, bounds.top + 80,
                           bounds.right - 18, bounds.bottom - 12 };
     DrawTextW(dc, version, -1, &version_rect, DT_LEFT | DT_SINGLELINE);
     SelectObject(dc, old_font);
+    if (brand_symbol) DestroyIcon(brand_symbol);
     DeleteObject(accent);
     DeleteObject(background);
 }
@@ -2796,7 +2972,7 @@ static BOOL RunHistorySelfTests(void) {
     if (!History_ShouldSkip(folder, L"legacy-id", L"legacy.mp3", 320) ||
         History_ShouldSkip(folder, L"legacy-id", L"legacy.mp3", 128)) goto cleanup;
     wchar_t *migrated = ReadTextFile(history_path);
-    if (!migrated || !wcsstr(migrated, L"# Febius download history v2") ||
+    if (!migrated || !wcsstr(migrated, L"# Febius Downrush download history v2") ||
         !wcsstr(migrated, L"legacy-id\t320\t")) {
         free(migrated);
         goto cleanup;
@@ -2841,6 +3017,16 @@ static BOOL RunCoreSelfTests(void) {
     if (!Filename_IsHttpUrl(L"HTTPS://www.youtube.com/watch?v=test") ||
         Filename_IsHttpUrl(L"ftp://example.com/file")) return FALSE;
 
+    if (!PathsEqualIgnoringTrailingSeparators(L"C:\\Music\\YouTubeMP3\\",
+                                               L"c:\\music\\YouTubeMP3") ||
+        PathsEqualIgnoringTrailingSeparators(L"C:\\Music\\YouTubeMP3",
+                                              L"C:\\Music\\Febius\\Downrush")) return FALSE;
+
+    if (MetadataWorkerLimitFor(1) != 1 || MetadataWorkerLimitFor(2) != 1 ||
+        MetadataWorkerLimitFor(4) != 2 || MetadataWorkerLimitFor(8) != META_WORKER_COUNT ||
+        DownloadWorkerLimitFor(2) != 1 ||
+        DownloadWorkerLimitFor(4) != DOWNLOAD_WORKER_COUNT) return FALSE;
+
     wchar_t cleaned[256];
     Filename_BuildClean(L"가수 - 노래 (공식 뮤비)", L"", L"", TRUE, TRUE, cleaned, 256);
     if (wcscmp(cleaned, L"가수 - 노래.mp3")) return FALSE;
@@ -2869,6 +3055,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     (void)hPrevInstance;
     (void)lpCmdLine;
     g_instance = hInstance;
+    SYSTEM_INFO system_info;
+    GetNativeSystemInfo(&system_info);
+    g_processor_count = system_info.dwNumberOfProcessors ? system_info.dwNumberOfProcessors : 1;
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)) {
         SetProcessDPIAware();
     }
@@ -2884,18 +3073,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     if (!g_cancel_event || !History_Init() || !InitializeAppDataPaths()) goto cleanup;
     Logger_Init(g_local_app_dir);
     wchar_t startup_log[96];
-    if (SUCCEEDED(StringCchPrintfW(startup_log, 96, L"Febius %s을 시작합니다.", APP_VERSION_W))) {
+    if (SUCCEEDED(StringCchPrintfW(startup_log, 96, L"Febius Downrush %s을 시작합니다.", APP_VERSION_W))) {
         Logger_Write(L"app", startup_log);
+    }
+    wchar_t performance_log[128];
+    if (SUCCEEDED(StringCchPrintfW(performance_log, 128,
+            L"논리 프로세서 %lu개: 정보 조회 %d개, 다운로드 %d개 동시 작업을 사용합니다.",
+            g_processor_count, MetadataWorkerLimit(), DownloadWorkerLimit()))) {
+        Logger_Write(L"performance", performance_log);
     }
     CleanupOrphanTempDirectories();
 
     BOOL core_self_test = HasCommandLineSwitch(L"--self-test-core");
     BOOL tool_self_test = HasCommandLineSwitch(L"--self-test-tools");
     if (!core_self_test && !tool_self_test) {
-        g_instance_mutex = CreateMutexW(NULL, TRUE, L"Local\\FebiusYTMP3Downloader.SingleInstance");
+        g_instance_mutex = CreateMutexW(NULL, TRUE, L"Local\\Febius.Downrush.SingleInstance");
         DWORD mutex_error = GetLastError();
         if (!g_instance_mutex || mutex_error == ERROR_ALREADY_EXISTS) {
-            MessageBoxW(NULL, L"Febius가 이미 실행 중입니다.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(NULL, L"Febius Downrush가 이미 실행 중입니다.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
             if (g_instance_mutex) {
                 CloseHandle(g_instance_mutex);
                 g_instance_mutex = NULL;
@@ -2924,6 +3119,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     }
 
     LoadSettings();
+    MigrateLegacyDefaultOutputFolder();
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -2938,7 +3134,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     splash_wc.hInstance = hInstance;
     splash_wc.hCursor = LoadCursorW(NULL, IDC_WAIT);
     splash_wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    splash_wc.lpszClassName = L"FebiusYTMP3SplashWin32";
+    splash_wc.lpszClassName = L"FebiusDownrushSplashWin32";
     if (!RegisterClassExW(&splash_wc)) goto cleanup;
 
     WNDCLASSEXW wc;
@@ -2949,7 +3145,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"FebiusYTMP3ClassicWin32";
+    wc.lpszClassName = L"FebiusDownrushClassicWin32";
     wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON),
                                    IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     if (!RegisterClassExW(&wc)) goto cleanup;

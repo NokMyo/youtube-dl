@@ -6,5 +6,6 @@
 #define IDC_ABOUT_BANNER        3005
 #define IDC_ABOUT_RELEASES      3006
 #define IDI_APP_ICON            3100
+#define IDI_FEBIUS_SYMBOL       3101
 
 #endif

@@ -129,7 +129,8 @@ BOOL Process_RunLines(const wchar_t *command,
             }
         }
 
-        DWORD wait = WaitForSingleObject(process.hProcess, 50);
+        /* 100 ms keeps cancellation responsive while reducing wakeups on older CPUs. */
+        DWORD wait = WaitForSingleObject(process.hProcess, 100);
         if (wait == WAIT_OBJECT_0) break;
         if (wait == WAIT_FAILED) {
             TerminateJobObject(job, ERROR_GEN_FAILURE);

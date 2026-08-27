@@ -30,7 +30,7 @@ jobs:
       - name: Run core self-tests
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath 'build/Release/FebiusYTMP3Downloader.exe' -ArgumentList '--self-test-core' -PassThru -Wait
+          $p = Start-Process -FilePath 'build/Release/FebiusDownrush.exe' -ArgumentList '--self-test-core' -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Core self-test failed with exit code $($p.ExitCode)." }
 
       - name: Verify portable MSVC runtime
@@ -40,7 +40,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
-          $deps = & $dumpbin.FullName /DEPENDENTS build/Release/FebiusYTMP3Downloader.exe | Out-String
+          $deps = & $dumpbin.FullName /DEPENDENTS build/Release/FebiusDownrush.exe | Out-String
           if ($deps -match 'VCRUNTIME140(?:_1)?\.dll' -or $deps -match 'MSVCP140(?:_\d+)?\.dll') {
             throw 'Release EXE still depends on the Visual C++ runtime DLLs.'
           }
@@ -60,14 +60,14 @@ jobs:
       - name: Verify bundled tools
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath '.\FebiusYTMP3Downloader.exe' -ArgumentList '--self-test-tools' -PassThru -Wait
+          $p = Start-Process -FilePath '.\FebiusDownrush.exe' -ArgumentList '--self-test-tools' -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Bundled tool self-test failed with exit code $($p.ExitCode)." }
 
       - name: Upload single-file EXE
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: FebiusYTMP3Downloader-windows-x64
+          name: Febius-Downrush-windows-x64
           path: |
-            FebiusYTMP3Downloader.exe
-            FebiusYTMP3Downloader.exe.sha256
+            FebiusDownrush.exe
+            FebiusDownrush.exe.sha256
             SIGNING_STATUS.txt

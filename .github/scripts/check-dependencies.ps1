@@ -8,7 +8,7 @@ function Read-PinnedVersion([string]$name) {
   return $match.Groups['version'].Value
 }
 
-$headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; 'User-Agent' = 'Febius-dependency-check' }
+$headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; 'User-Agent' = 'Febius-Downrush-dependency-check' }
 $dependencies = @(
   @{ Name = 'yt-dlp'; Variable = 'ytDlpVersion'; Repository = 'yt-dlp/yt-dlp'; Prefix = '' },
   @{ Name = 'yt-dlp-ejs'; Variable = 'ejsVersion'; Repository = 'yt-dlp/ejs'; Prefix = '' },

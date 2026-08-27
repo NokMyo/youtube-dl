@@ -30,7 +30,7 @@ BOOL Logger_Init(const wchar_t *local_app_dir) {
     if (FAILED(StringCchPrintfW(log_dir, MAX_PATH, L"%s\\logs", local_app_dir)) ||
         (SHCreateDirectoryExW(NULL, log_dir, NULL) != ERROR_SUCCESS &&
          GetFileAttributesW(log_dir) == INVALID_FILE_ATTRIBUTES) ||
-        FAILED(StringCchPrintfW(g_log_path, MAX_PATH, L"%s\\Febius.log", log_dir))) {
+        FAILED(StringCchPrintfW(g_log_path, MAX_PATH, L"%s\\Downrush.log", log_dir))) {
         DeleteCriticalSection(&g_log_lock);
         g_log_path[0] = 0;
         return FALSE;
