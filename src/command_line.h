@@ -1,5 +1,5 @@
-#ifndef SEOWOL_COMMAND_LINE_H
-#define SEOWOL_COMMAND_LINE_H
+#ifndef FEBIUS_COMMAND_LINE_H
+#define FEBIUS_COMMAND_LINE_H
 
 #include <windows.h>
 #include <stddef.h>

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 cmake_policy(SET CMP0091 NEW)
 cmake_policy(SET CMP0069 NEW)
-project(SeowolYTMP3Downloader LANGUAGES C RC)
+project(FebiusYTMP3Downloader LANGUAGES C RC)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -20,14 +20,14 @@ configure_file(src/version.h.in generated/version.h @ONLY)
 # VCRUNTIME140.dll / the Visual C++ Redistributable on the target PC.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_executable(SeowolYTMP3Downloader WIN32
+add_executable(FebiusYTMP3Downloader WIN32
     src/app.rc
     src/command_line.c
     src/filename.c
     src/main.c
 )
 
-target_include_directories(SeowolYTMP3Downloader PRIVATE
+target_include_directories(FebiusYTMP3Downloader PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
@@ -35,12 +35,12 @@ target_include_directories(SeowolYTMP3Downloader PRIVATE
 include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR LANGUAGES C)
 if(IPO_SUPPORTED)
-    set_property(TARGET SeowolYTMP3Downloader PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET FebiusYTMP3Downloader PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 else()
     message(WARNING "Interprocedural optimization is unavailable: ${IPO_ERROR}")
 endif()
 
-target_compile_definitions(SeowolYTMP3Downloader PRIVATE
+target_compile_definitions(FebiusYTMP3Downloader PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
@@ -48,21 +48,21 @@ target_compile_definitions(SeowolYTMP3Downloader PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(SeowolYTMP3Downloader PRIVATE
+    target_compile_options(FebiusYTMP3Downloader PRIVATE
         $<$<COMPILE_LANGUAGE:C>:/W4>
         $<$<COMPILE_LANGUAGE:C>:/utf-8>
         $<$<COMPILE_LANGUAGE:C>:/O2>
         $<$<COMPILE_LANGUAGE:C>:/Gy>
         $<$<COMPILE_LANGUAGE:RC>:/nologo>
     )
-    target_link_options(SeowolYTMP3Downloader PRIVATE
+    target_link_options(FebiusYTMP3Downloader PRIVATE
         $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
     )
 else()
-    target_compile_options(SeowolYTMP3Downloader PRIVATE -Wall -Wextra)
+    target_compile_options(FebiusYTMP3Downloader PRIVATE -Wall -Wextra)
 endif()
 
-target_link_libraries(SeowolYTMP3Downloader PRIVATE
+target_link_libraries(FebiusYTMP3Downloader PRIVATE
     comctl32
     comdlg32
     shell32

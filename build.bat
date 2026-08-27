@@ -6,7 +6,7 @@ if errorlevel 1 goto :failed
 cmake --build build --config Release
 if errorlevel 1 goto :failed
 echo.
-echo Build complete: build\Release\SeowolYTMP3Downloader.exe
+echo Build complete: build\Release\FebiusYTMP3Downloader.exe
 popd
 endlocal
 exit /b 0

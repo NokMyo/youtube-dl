@@ -1,5 +1,5 @@
-#ifndef SEOWOL_FILENAME_H
-#define SEOWOL_FILENAME_H
+#ifndef FEBIUS_FILENAME_H
+#define FEBIUS_FILENAME_H
 
 #include <windows.h>
 #include <stddef.h>

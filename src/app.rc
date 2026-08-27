@@ -4,23 +4,25 @@
 #include "resource.h"
 #include "version.h"
 
-IDD_ABOUT DIALOGEX 0, 0, 390, 250
+IDD_ABOUT DIALOGEX 0, 0, 390, 265
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Seowol YT MP3 Downloader 정보"
+CAPTION "Febius YT MP3 Downloader 정보"
 FONT 9, "굴림"
 BEGIN
     CONTROL         "", IDC_ABOUT_BANNER, "STATIC", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 390, 63
-    GROUPBOX        "제품 정보", -1, 12, 72, 366, 64
-    LTEXT           "개발 및 저작권", -1, 23, 89, 88, 11
-    LTEXT           "NokMyo  |  Copyright © 2026 NokMyo. All rights reserved.", -1, 119, 89, 246, 11
-    LTEXT           "라이선스", -1, 23, 106, 88, 11
-    LTEXT           "독점 소프트웨어 · 외부 구성 요소는 각 오픈소스 라이선스 적용", -1, 119, 106, 246, 20
-    GROUPBOX        "포함된 구성 요소", -1, 12, 143, 366, 53
-    LTEXT           "yt-dlp Windows 실행 파일 — GNU GPL v3 이상", -1, 23, 160, 342, 11
-    LTEXT           "FFmpeg Essentials Build — GNU GPL v3", -1, 23, 176, 342, 11
-    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 105, 211, 92, 25
-    PUSHBUTTON      "릴리스 정보", IDC_ABOUT_RELEASES, 204, 211, 78, 25
-    DEFPUSHBUTTON   "확인", IDOK, 289, 211, 78, 25
+    GROUPBOX        "제품 정보", -1, 12, 72, 366, 78
+    LTEXT           "제품군", -1, 23, 88, 88, 11
+    LTEXT           "Febius Utility Series", -1, 119, 88, 246, 11
+    LTEXT           "개발 및 저작권", -1, 23, 104, 88, 11
+    LTEXT           "NokMyo  |  Copyright © 2026 NokMyo. All rights reserved.", -1, 119, 104, 246, 11
+    LTEXT           "라이선스", -1, 23, 120, 88, 11
+    LTEXT           "개인용 비상업적 사용 허용 · 외부 구성 요소는 각 오픈소스 라이선스 적용", -1, 119, 120, 246, 20
+    GROUPBOX        "포함된 구성 요소", -1, 12, 157, 366, 53
+    LTEXT           "yt-dlp Windows 실행 파일 — GNU GPL v3 이상", -1, 23, 174, 342, 11
+    LTEXT           "FFmpeg Essentials Build — GNU GPL v3", -1, 23, 190, 342, 11
+    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 105, 225, 92, 25
+    PUSHBUTTON      "릴리스 정보", IDC_ABOUT_RELEASES, 204, 225, 78, 25
+    DEFPUSHBUTTON   "확인", IDOK, 289, 225, 78, 25
 END
 
 VS_VERSION_INFO VERSIONINFO
@@ -40,13 +42,13 @@ BEGIN
     BEGIN
         BLOCK "041204B0"
         BEGIN
-            VALUE "CompanyName", "NokMyo\0"
-            VALUE "FileDescription", "Seowol YT MP3 Downloader\0"
+            VALUE "CompanyName", "Febius\0"
+            VALUE "FileDescription", "Febius YT MP3 Downloader\0"
             VALUE "FileVersion", APP_VERSION_TEXT "\0"
-            VALUE "InternalName", "SeowolYTMP3Downloader\0"
+            VALUE "InternalName", "FebiusYTMP3Downloader\0"
             VALUE "LegalCopyright", APP_COPYRIGHT_TEXT "\0"
-            VALUE "OriginalFilename", "SeowolYTMP3Downloader.exe\0"
-            VALUE "ProductName", "Seowol YT MP3 Downloader\0"
+            VALUE "OriginalFilename", "FebiusYTMP3Downloader.exe\0"
+            VALUE "ProductName", "Febius YT MP3 Downloader\0"
             VALUE "ProductVersion", APP_VERSION_TEXT "\0"
         END
     END

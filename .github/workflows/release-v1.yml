@@ -52,7 +52,7 @@ jobs:
       - name: Run core self-tests
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath 'build/Release/SeowolYTMP3Downloader.exe' -ArgumentList '--self-test-core' -PassThru -Wait
+          $p = Start-Process -FilePath 'build/Release/FebiusYTMP3Downloader.exe' -ArgumentList '--self-test-core' -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Core self-test failed with exit code $($p.ExitCode)." }
 
       - name: Verify portable MSVC runtime
@@ -62,7 +62,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
-          $deps = & $dumpbin.FullName /DEPENDENTS build/Release/SeowolYTMP3Downloader.exe | Out-String
+          $deps = & $dumpbin.FullName /DEPENDENTS build/Release/FebiusYTMP3Downloader.exe | Out-String
           if ($deps -match 'VCRUNTIME140(?:_1)?\.dll' -or $deps -match 'MSVCP140(?:_\d+)?\.dll') {
             throw 'Release EXE still depends on the Visual C++ runtime DLLs.'
           }
@@ -75,9 +75,9 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path 'payload/*' -DestinationPath 'tools-payload.zip' -CompressionLevel Optimal -Force
-          Copy-Item 'build/Release/SeowolYTMP3Downloader.exe' 'SeowolYTMP3Downloader.exe'
+          Copy-Item 'build/Release/FebiusYTMP3Downloader.exe' 'FebiusYTMP3Downloader.exe'
           $payload = [System.IO.File]::ReadAllBytes((Resolve-Path 'tools-payload.zip'))
-          $out = [System.IO.File]::Open('SeowolYTMP3Downloader.exe', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
+          $out = [System.IO.File]::Open('FebiusYTMP3Downloader.exe', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
           try {
             $out.Write($payload, 0, $payload.Length)
             $size = [BitConverter]::GetBytes([Int64]$payload.Length)
@@ -91,7 +91,7 @@ jobs:
       - name: Verify bundled tools
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath '.\SeowolYTMP3Downloader.exe' -ArgumentList '--self-test-tools' -PassThru -Wait
+          $p = Start-Process -FilePath '.\FebiusYTMP3Downloader.exe' -ArgumentList '--self-test-tools' -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Bundled tool self-test failed with exit code $($p.ExitCode)." }
 
       - name: Create GitHub Release
@@ -100,5 +100,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v$env:VERSION"
-          $title = "Seowol YT MP3 Downloader v$env:VERSION"
-          gh release create $tag SeowolYTMP3Downloader.exe --target $env:GITHUB_SHA --title $title --notes-file $env:RELEASE_NOTES_FILE
+          $title = "Febius YT MP3 Downloader v$env:VERSION"
+          gh release create $tag FebiusYTMP3Downloader.exe --target $env:GITHUB_SHA --title $title --notes-file $env:RELEASE_NOTES_FILE

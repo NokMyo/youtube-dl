@@ -26,7 +26,7 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "advapi32.lib")
 
-#define APP_TITLE L"Seowol YT MP3 Downloader"
+#define APP_TITLE L"Febius YT MP3 Downloader"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
 #define CLEAN_NAME_CCH 256
@@ -225,7 +225,7 @@ static int g_main_show_command = SW_SHOWNORMAL;
 static ULONGLONG g_splash_started = 0;
 
 static const wchar_t *RELEASES_URL = L"https://github.com/NokMyo/youtube-dl/releases";
-static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\SeowolYTMP3Downloader";
+static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\FebiusYTMP3Downloader";
 
 static BOOL IsSupportedBitrate(DWORD value) {
     return value == 128 || value == 192 || value == 256 || value == 320;
@@ -447,7 +447,7 @@ static BOOL PrepareBundledTools(void) {
         return FALSE;
     }
     EnterCriticalSection(&g_tools_lock);
-    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\SeowolYTMP3Downloader\\tools", local);
+    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\FebiusYTMP3Downloader\\tools", local);
     LeaveCriticalSection(&g_tools_lock);
     SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
 
@@ -1992,7 +1992,7 @@ static BOOL FetchLatestVersion(wchar_t *version, size_t cch) {
     BOOL ok = FALSE;
     HINTERNET session = NULL, connection = NULL, request = NULL;
     wchar_t user_agent[96];
-    StringCchPrintfW(user_agent, 96, L"SeowolYTMP3Downloader/%s", APP_VERSION_W);
+    StringCchPrintfW(user_agent, 96, L"FebiusYTMP3Downloader/%s", APP_VERSION_W);
 
     session = WinHttpOpen(user_agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -2134,19 +2134,18 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             HFONT old_font = (HFONT)SelectObject(dc, title_font);
             SetTextColor(dc, RGB(255, 255, 255));
             RECT title = {24, 16, client.right - 20, 49};
-            DrawTextW(dc, L"Seowol", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+            DrawTextW(dc, L"Febius", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SelectObject(dc, body_font);
             RECT subtitle = {26, 51, client.right - 20, 76};
-            DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &subtitle, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, L"UTILITY SERIES", -1, &subtitle, DT_LEFT | DT_SINGLELINE);
 
             SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
             wchar_t version_text[64];
-            StringCchPrintfW(version_text, 64, L"버전 %s", APP_VERSION_W);
-            RECT version = {24, 103, client.right - 24, 124};
+            RECT product = {24, 103, client.right - 24, 124};
+            DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &product, DT_LEFT | DT_SINGLELINE);
+            StringCchPrintfW(version_text, 64, L"Version %s  ·  Windows x64", APP_VERSION_W);
+            RECT version = {24, 130, client.right - 24, 151};
             DrawTextW(dc, version_text, -1, &version, DT_LEFT | DT_SINGLELINE);
-            RECT description = {24, 130, client.right - 24, 151};
-            DrawTextW(dc, L"YouTube 링크를 MP3 파일로 정리하는 Windows 프로그램", -1,
-                      &description, DT_LEFT | DT_SINGLELINE);
             RECT status = {24, 165, client.right - 24, 187};
             DrawTextW(dc, StartupStatusText(), -1, &status, DT_LEFT | DT_SINGLELINE);
 
@@ -2199,7 +2198,7 @@ static BOOL CreateSplashWindow(void) {
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
     g_splash = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        L"SeowolYTMP3SplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
+        L"FebiusYTMP3SplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
         x, y, width, height, NULL, NULL, g_instance, NULL);
     if (!g_splash) return FALSE;
     g_splash_started = GetTickCount64();
@@ -2272,14 +2271,14 @@ static void DrawAboutBanner(const DRAWITEMSTRUCT *item) {
 
     RECT title = { bounds.left + 96, bounds.top + 17,
                    bounds.right - 18, bounds.top + 54 };
-    DrawTextW(dc, L"Seowol", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(dc, L"Febius", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     SelectObject(dc, body_font);
     SetTextColor(dc, RGB(178, 204, 230));
     RECT product = { bounds.left + 98, bounds.top + 56,
                      bounds.right - 18, bounds.top + 78 };
-    DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &product, DT_LEFT | DT_SINGLELINE);
+    DrawTextW(dc, L"UTILITY SERIES", -1, &product, DT_LEFT | DT_SINGLELINE);
     wchar_t version[96];
-    StringCchPrintfW(version, 96, L"버전 %s  ·  Windows x64", APP_VERSION_W);
+    StringCchPrintfW(version, 96, L"YT MP3 DOWNLOADER  ·  Version %s  ·  Windows x64", APP_VERSION_W);
     SetTextColor(dc, RGB(225, 230, 238));
     RECT version_rect = { bounds.left + 98, bounds.top + 80,
                           bounds.right - 18, bounds.bottom - 12 };
@@ -2619,7 +2618,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     splash_wc.hInstance = hInstance;
     splash_wc.hCursor = LoadCursorW(NULL, IDC_WAIT);
     splash_wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    splash_wc.lpszClassName = L"SeowolYTMP3SplashWin32";
+    splash_wc.lpszClassName = L"FebiusYTMP3SplashWin32";
     if (!RegisterClassExW(&splash_wc)) goto cleanup;
 
     WNDCLASSEXW wc;
@@ -2630,7 +2629,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"SeowolYTMP3ClassicWin32";
+    wc.lpszClassName = L"FebiusYTMP3ClassicWin32";
     wc.hIconSm = LoadIconW(NULL, IDI_APPLICATION);
     if (!RegisterClassExW(&wc)) goto cleanup;
 
