@@ -1,3 +1,7 @@
+# v1.1.3
+
+- 버그 수정
+
 # v1.1.2
 
 - 최신 YouTube 추출에 필요한 Deno JavaScript 런타임을 내장하고 `yt-dlp` 실행 환경 보강
