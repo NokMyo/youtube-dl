@@ -35,16 +35,20 @@ function Invoke-VerifiedDownload {
 }
 
 New-Item -ItemType Directory -Force payload | Out-Null
-Invoke-VerifiedDownload -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'payload/yt-dlp.exe'
-Invoke-VerifiedDownload -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS' -OutFile 'yt-dlp-SHA2-256SUMS.txt'
+$ytDlpVersion = '2026.08.19'
+$ytDlpSha256 = '66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a'
+$ejsVersion = '0.8.0'
+$ytDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/download/$ytDlpVersion/yt-dlp.exe"
+Invoke-VerifiedDownload -Uri $ytDlpUrl -OutFile 'payload/yt-dlp.exe' -Sha256 $ytDlpSha256
 
-$ytDlpLine = Get-Content -LiteralPath 'yt-dlp-SHA2-256SUMS.txt' |
-  Where-Object { $_ -match '^(?<hash>[0-9a-fA-F]{64})\s+\*?yt-dlp\.exe\s*$' } |
-  Select-Object -First 1
-if (-not $ytDlpLine) { throw 'yt-dlp.exe checksum was not found.' }
-$null = $ytDlpLine -match '^(?<hash>[0-9a-fA-F]{64})'
-$ytDlpActual = (Get-FileHash -LiteralPath 'payload/yt-dlp.exe' -Algorithm SHA256).Hash
-if ($ytDlpActual -ne $Matches.hash) { throw 'yt-dlp.exe SHA-256 verification failed.' }
+$denoVersion = '2.9.5'
+$denoSha256 = '171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a'
+$denoUrl = "https://github.com/denoland/deno/releases/download/v$denoVersion/deno-x86_64-pc-windows-msvc.zip"
+Invoke-VerifiedDownload -Uri $denoUrl -OutFile 'deno.zip' -Sha256 $denoSha256
+Expand-Archive -LiteralPath 'deno.zip' -DestinationPath 'deno-dist' -Force
+$deno = Get-ChildItem 'deno-dist' -Recurse -Filter 'deno.exe' | Select-Object -First 1
+if (-not $deno) { throw 'Deno executable was not found.' }
+Copy-Item $deno.FullName 'payload/deno.exe'
 
 $ffmpegVersion = '9.0.1'
 $ffmpegSha256 = 'fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9'
@@ -60,8 +64,12 @@ Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
 Copy-Item 'LICENSE.txt' 'payload/APPLICATION_LICENSE.txt'
 
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.GPLv3' -OutFile 'payload/GPL-3.0.txt'
-Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/LICENSE' -OutFile 'payload/YT-DLP-UNLICENSE.txt'
-Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/THIRD_PARTY_LICENSES.txt' -OutFile 'payload/YT-DLP-THIRD-PARTY-LICENSES.txt'
+Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$ytDlpVersion/LICENSE" -OutFile 'payload/YT-DLP-UNLICENSE.txt'
+Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$ytDlpVersion/THIRD_PARTY_LICENSES.txt" -OutFile 'payload/YT-DLP-THIRD-PARTY-LICENSES.txt'
+Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/yt-dlp/ejs/$ejsVersion/LICENSE" -OutFile 'payload/YT-DLP-EJS-UNLICENSE.txt'
+Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/davidbonnet/astring/v1.9.0/LICENSE' -OutFile 'payload/ASTRING-MIT-LICENSE.txt'
+Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/meriyah/meriyah/v6.1.4/LICENSE.md' -OutFile 'payload/MERIYAH-ISC-LICENSE.txt'
+Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/denoland/deno/v$denoVersion/LICENSE.md" -OutFile 'payload/DENO-MIT-LICENSE.txt'
 
 $ffmpegLicense = & 'payload/ffmpeg.exe' -hide_banner -L 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the FFmpeg license information.' }
@@ -73,12 +81,19 @@ $ffmpegLicense | Set-Content -Encoding UTF8 'payload/FFMPEG-LICENSE.txt'
   'The following command-line programs are distributed alongside the application',
   'and are launched as separate processes:',
   '',
-  '1. yt-dlp Windows executable',
-  '   License: GNU General Public License version 3 or later (GPL-3.0-or-later)',
+  "1. yt-dlp Windows executable $ytDlpVersion (including yt-dlp-ejs $ejsVersion)",
+  '   License: Unlicense; bundled dependencies retain their own licenses',
   '   Source: https://github.com/yt-dlp/yt-dlp',
-  '   Details: YT-DLP-THIRD-PARTY-LICENSES.txt',
+  '   Details: YT-DLP-UNLICENSE.txt, YT-DLP-EJS-UNLICENSE.txt,',
+  '            YT-DLP-THIRD-PARTY-LICENSES.txt, ASTRING-MIT-LICENSE.txt,',
+  '            MERIYAH-ISC-LICENSE.txt',
   '',
-  '2. FFmpeg and ffprobe - Gyan Essentials Build',
+  "2. Deno JavaScript runtime $denoVersion",
+  '   License: MIT License',
+  '   Source: https://github.com/denoland/deno',
+  '   Details: DENO-MIT-LICENSE.txt',
+  '',
+  "3. FFmpeg and ffprobe $ffmpegVersion - Gyan Essentials Build",
   '   License: GNU General Public License version 3 (GPL-3.0)',
   '   Source: https://github.com/FFmpeg/FFmpeg',
   '   Build information: https://www.gyan.dev/ffmpeg/builds/',
@@ -87,3 +102,10 @@ $ffmpegLicense | Set-Content -Encoding UTF8 'payload/FFMPEG-LICENSE.txt'
   'The complete GPL version 3 text is included as GPL-3.0.txt.',
   'These projects are independent of and are not endorsed by NokMyo.'
 ) | Set-Content -Encoding UTF8 'payload/THIRD_PARTY_NOTICES.txt'
+
+@(
+  "yt-dlp $ytDlpVersion  SHA256 $ytDlpSha256",
+  "yt-dlp-ejs $ejsVersion (bundled in yt-dlp.exe)",
+  "Deno $denoVersion  SHA256 $denoSha256",
+  "FFmpeg Gyan Essentials $ffmpegVersion  SHA256 $ffmpegSha256"
+) | Set-Content -Encoding UTF8 'payload/DEPENDENCY_VERSIONS.txt'

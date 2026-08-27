@@ -4,6 +4,9 @@
 #include "resource.h"
 #include "version.h"
 
+1 RT_MANIFEST "app.manifest"
+IDI_APP_ICON ICON "app.ico"
+
 IDD_ABOUT DIALOGEX 0, 0, 390, 265
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Febius YT MP3 Downloader 정보"
@@ -18,7 +21,7 @@ BEGIN
     LTEXT           "라이선스", -1, 23, 120, 88, 11
     LTEXT           "개인용 비상업적 사용 허용 · 외부 구성 요소는 각 오픈소스 라이선스 적용", -1, 119, 120, 246, 20
     GROUPBOX        "포함된 구성 요소", -1, 12, 157, 366, 53
-    LTEXT           "yt-dlp Windows 실행 파일 — GNU GPL v3 이상", -1, 23, 174, 342, 11
+    LTEXT           "yt-dlp/yt-dlp-ejs — Unlicense · Deno — MIT", -1, 23, 174, 342, 11
     LTEXT           "FFmpeg Essentials Build — GNU GPL v3", -1, 23, 190, 342, 11
     PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 105, 225, 92, 25
     PUSHBUTTON      "릴리스 정보", IDC_ABOUT_RELEASES, 204, 225, 78, 25

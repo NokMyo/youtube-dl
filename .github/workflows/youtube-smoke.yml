@@ -1,0 +1,27 @@
+name: YouTube smoke test
+
+on:
+  schedule:
+    - cron: '41 3 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  youtube:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download pinned tools
+        shell: pwsh
+        run: ./.github/scripts/prepare-payload.ps1
+      - name: Resolve a stable YouTube test video with Deno
+        shell: pwsh
+        run: |
+          & .\payload\yt-dlp.exe --ignore-config --no-update --simulate --no-playlist `
+            --js-runtimes "deno:$((Resolve-Path '.\payload\deno.exe').Path)" `
+            --socket-timeout 30 --retries 1 --extractor-retries 1 `
+            -- https://www.youtube.com/watch?v=BaW_jenozKc
+          if ($LASTEXITCODE -ne 0) { throw "YouTube smoke test failed with exit code $LASTEXITCODE." }

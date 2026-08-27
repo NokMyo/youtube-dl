@@ -225,6 +225,7 @@ void Filename_BuildClean(const wchar_t *raw_title,
     }
     if (!*base) StringCchCopyW(base, 1024, L"untitled");
     if (sanitize) Filename_Sanitize(base, 1024);
+    if (!*base) StringCchCopyW(base, 1024, L"untitled");
     if (wcslen(base) > 180) base[180] = 0;
     StringCchPrintfW(out, cch, L"%s.mp3", base);
 }

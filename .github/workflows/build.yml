@@ -10,12 +10,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure
         run: cmake -S . -B build -A x64
@@ -47,20 +51,11 @@ jobs:
 
       - name: Build single-file EXE
         shell: pwsh
-        run: |
-          Compress-Archive -Path 'payload/*' -DestinationPath 'tools-payload.zip' -CompressionLevel Optimal -Force
-          Copy-Item 'build/Release/FebiusYTMP3Downloader.exe' 'FebiusYTMP3Downloader.exe'
-          $payload = [System.IO.File]::ReadAllBytes((Resolve-Path 'tools-payload.zip'))
-          $out = [System.IO.File]::Open('FebiusYTMP3Downloader.exe', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
-          try {
-            $out.Write($payload, 0, $payload.Length)
-            $size = [BitConverter]::GetBytes([Int64]$payload.Length)
-            $out.Write($size, 0, $size.Length)
-            $magic = [Text.Encoding]::ASCII.GetBytes('YTMP3PK1')
-            $out.Write($magic, 0, $magic.Length)
-          } finally {
-            $out.Dispose()
-          }
+        run: ./.github/scripts/build-single-file.ps1
+
+      - name: Generate checksum
+        shell: pwsh
+        run: ./.github/scripts/sign-and-hash.ps1
 
       - name: Verify bundled tools
         shell: pwsh
@@ -69,7 +64,10 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Bundled tool self-test failed with exit code $($p.ExitCode)." }
 
       - name: Upload single-file EXE
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: FebiusYTMP3Downloader-windows-x64
-          path: FebiusYTMP3Downloader.exe
+          path: |
+            FebiusYTMP3Downloader.exe
+            FebiusYTMP3Downloader.exe.sha256
+            SIGNING_STATUS.txt

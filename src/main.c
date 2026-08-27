@@ -16,6 +16,9 @@
 
 #include "command_line.h"
 #include "filename.h"
+#include "history.h"
+#include "logger.h"
+#include "process_runner.h"
 #include "resource.h"
 #include "version.h"
 
@@ -50,6 +53,8 @@
 #define IDC_OVERALL             1042
 #define IDC_RAW_TITLE           1050
 #define IDC_CLEAN_TITLE         1051
+#define IDC_APPLY_FILENAME      1052
+#define IDC_CANCEL_DOWNLOAD     1053
 
 #define WM_APP_JOB_UPDATED      (WM_APP + 1)
 #define WM_APP_REBUILD_LIST     (WM_APP + 2)
@@ -73,6 +78,7 @@
 #define IDM_JOB_DELETE_SELECTED 2015
 #define IDM_TOOLS_REFRESH_STATS 2020
 #define IDM_TOOLS_OPEN_HISTORY  2021
+#define IDM_TOOLS_OPEN_LOG      2022
 #define IDM_HELP_ABOUT          2030
 #define IDM_HELP_CHECK_UPDATES  2031
 #define IDM_HELP_RELEASES       2032
@@ -112,6 +118,7 @@ typedef struct Job {
     ULONGLONG expected_size;
     int progress;
     JobStatus status;
+    BOOL custom_name;
 } Job;
 
 typedef struct MetaBatch {
@@ -121,8 +128,10 @@ typedef struct MetaBatch {
 
 typedef struct DownloadBatch {
     BOOL failed_only;
+    BOOL skip_existing;
     int bitrate;
     wchar_t folder[MAX_PATH];
+    wchar_t temp_dir[MAX_PATH];
 } DownloadBatch;
 
 typedef struct MetaWork {
@@ -135,14 +144,11 @@ typedef struct DownloadWork {
     int total;
     volatile LONG next;
     volatile LONG done;
+    BOOL skip_existing;
     int bitrate;
     wchar_t folder[MAX_PATH];
+    wchar_t temp_dir[MAX_PATH];
 } DownloadWork;
-
-typedef struct HistoryNode {
-    wchar_t id[128];
-    struct HistoryNode *next;
-} HistoryNode;
 
 typedef struct FolderStatsResult {
     LONG generation;
@@ -186,6 +192,9 @@ static HWND g_status;
 static HWND g_overall;
 static HWND g_raw_title;
 static HWND g_clean_title;
+static HWND g_apply_filename;
+static HWND g_download_button;
+static HWND g_cancel_button;
 static HMENU g_options_menu;
 static HMENU g_quality_menu;
 static HFONT g_font;
@@ -196,9 +205,7 @@ static Job g_jobs[MAX_JOBS];
 static int g_job_count = 0;
 static CRITICAL_SECTION g_jobs_lock;
 static CRITICAL_SECTION g_file_lock;
-static CRITICAL_SECTION g_history_lock;
 static CRITICAL_SECTION g_tools_lock;
-static HistoryNode *g_history[1024];
 static volatile LONG g_meta_running = 0;
 static volatile LONG g_download_running = 0;
 static volatile LONG g_tools_loading = 0;
@@ -206,6 +213,7 @@ static volatile LONG g_update_running = 0;
 static volatile LONG g_startup_phase = 0;
 static volatile LONG g_splash_tick = 0;
 static volatile LONG g_stats_generation = 0;
+static volatile LONG g_close_after_cancel = 0;
 static volatile LONG g_opt_dedup = 1;
 static volatile LONG g_opt_skip = 1;
 static volatile LONG g_opt_sanitize = 1;
@@ -218,29 +226,62 @@ static wchar_t g_app_dir[MAX_PATH];
 static wchar_t g_ytdlp[MAX_PATH];
 static wchar_t g_ffmpeg[MAX_PATH];
 static wchar_t g_ffmpeg_dir[MAX_PATH];
+static wchar_t g_deno[MAX_PATH];
 static wchar_t g_tools_dir[MAX_PATH];
-static wchar_t g_history_folder[MAX_PATH];
+static wchar_t g_local_app_dir[MAX_PATH];
 static wchar_t g_saved_folder[MAX_PATH];
+static HANDLE g_cancel_event;
+static HANDLE g_instance_mutex;
 static int g_main_show_command = SW_SHOWNORMAL;
 static ULONGLONG g_splash_started = 0;
+static UINT g_ui_dpi = 96;
 
 static const wchar_t *RELEASES_URL = L"https://github.com/NokMyo/youtube-dl/releases";
 static const wchar_t *SETTINGS_KEY = L"Software\\NokMyo\\FebiusYTMP3Downloader";
+static const wchar_t *LEGACY_SETTINGS_KEY = L"Software\\NokMyo\\SeowolYTMP3Downloader";
+
+static int ScaleUi(int value) {
+    return MulDiv(value, (int)g_ui_dpi, 96);
+}
 
 static BOOL IsSupportedBitrate(DWORD value) {
     return value == 128 || value == 192 || value == 256 || value == 320;
 }
 
-static BOOL ReadSettingValue(const wchar_t *name, DWORD expected_type,
-                             void *value, DWORD *value_size) {
+static BOOL ReadSettingValueAt(const wchar_t *key_path, const wchar_t *name,
+                               DWORD expected_type, void *value, DWORD *value_size) {
     HKEY key = NULL;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, key_path, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
         return FALSE;
     }
     DWORD type = 0;
     LONG status = RegQueryValueExW(key, name, NULL, &type, (BYTE *)value, value_size);
     RegCloseKey(key);
     return status == ERROR_SUCCESS && type == expected_type;
+}
+
+static BOOL ReadSettingValue(const wchar_t *name, DWORD expected_type,
+                             void *value, DWORD *value_size) {
+    return ReadSettingValueAt(SETTINGS_KEY, name, expected_type, value, value_size);
+}
+
+static void MigrateLegacySettings(void) {
+    HKEY current = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, KEY_QUERY_VALUE, &current) == ERROR_SUCCESS) {
+        RegCloseKey(current);
+        return;
+    }
+
+    HKEY legacy = NULL, destination = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, LEGACY_SETTINGS_KEY, 0, KEY_READ, &legacy) != ERROR_SUCCESS) return;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0,
+                        KEY_WRITE, NULL, &destination, NULL) == ERROR_SUCCESS) {
+        if (RegCopyTreeW(legacy, NULL, destination) == ERROR_SUCCESS) {
+            Logger_Write(L"migration", L"Seowol 설정을 Febius 설정으로 이전했습니다.");
+        }
+        RegCloseKey(destination);
+    }
+    RegCloseKey(legacy);
 }
 
 static void WriteSettingValue(const wchar_t *name, DWORD type,
@@ -276,6 +317,7 @@ static void WriteSettingString(const wchar_t *name, const wchar_t *value) {
 }
 
 static void LoadSettings(void) {
+    MigrateLegacySettings();
     struct BooleanSetting {
         const wchar_t *name;
         volatile LONG *target;
@@ -346,6 +388,32 @@ static void GetAppDirectory(wchar_t *out, size_t cch) {
     if (slash) *slash = L'\0';
 }
 
+static BOOL InitializeAppDataPaths(void) {
+    wchar_t local[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE,
+                                NULL, SHGFP_TYPE_CURRENT, local))) return FALSE;
+    if (FAILED(StringCchPrintfW(g_local_app_dir, MAX_PATH,
+                                L"%s\\FebiusYTMP3Downloader", local))) return FALSE;
+
+    wchar_t legacy[MAX_PATH] = L"";
+    if (SUCCEEDED(StringCchPrintfW(legacy, MAX_PATH,
+                                   L"%s\\SeowolYTMP3Downloader", local)) &&
+        !DirectoryExistsW2(g_local_app_dir) && DirectoryExistsW2(legacy)) {
+        MoveFileExW(legacy, g_local_app_dir, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+    }
+    if (SHCreateDirectoryExW(NULL, g_local_app_dir, NULL) != ERROR_SUCCESS &&
+        !DirectoryExistsW2(g_local_app_dir)) return FALSE;
+
+    wchar_t legacy_tools[MAX_PATH], current_tools[MAX_PATH];
+    if (legacy[0] && SUCCEEDED(StringCchPrintfW(legacy_tools, MAX_PATH, L"%s\\tools", legacy)) &&
+        SUCCEEDED(StringCchPrintfW(current_tools, MAX_PATH, L"%s\\tools", g_local_app_dir)) &&
+        !DirectoryExistsW2(current_tools) && DirectoryExistsW2(legacy_tools)) {
+        MoveFileExW(legacy_tools, current_tools, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+        RemoveDirectoryW(legacy);
+    }
+    return TRUE;
+}
+
 static void SetStartupPhase(LONG phase) {
     InterlockedExchange((LONG *)&g_startup_phase, phase);
     HWND splash = g_splash;
@@ -366,8 +434,8 @@ static BOOL FindTool(const wchar_t *name, wchar_t *out, size_t cch) {
         StringCchCopyW(out, cch, local);
         return TRUE;
     }
-    DWORD n = SearchPathW(NULL, name, NULL, (DWORD)cch, out, NULL);
-    return n > 0 && n < cch;
+    out[0] = 0;
+    return FALSE;
 }
 
 static void DirectoryFromPath(const wchar_t *path, wchar_t *out, size_t cch) {
@@ -376,35 +444,26 @@ static void DirectoryFromPath(const wchar_t *path, wchar_t *out, size_t cch) {
     if (slash) *slash = L'\0';
 }
 
-static BOOL RunHiddenProcess(const wchar_t *command) {
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    wchar_t *cmd = _wcsdup(command);
-    if (!cmd) return FALSE;
-    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    free(cmd);
-    if (!ok) return FALSE;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return code == 0;
+static BOOL RunHiddenProcess(const wchar_t *command, DWORD timeout_ms) {
+    ProcessResult result;
+    BOOL ran = Process_RunHidden(command, g_cancel_event, timeout_ms, &result);
+    if (!ran || result.exit_code != 0) {
+        if (result.timed_out) Logger_Write(L"process", L"숨김 프로세스가 시간 제한을 초과했습니다.");
+        else if (result.cancelled) Logger_Write(L"process", L"숨김 프로세스가 취소되었습니다.");
+        else Logger_Write(L"process", L"숨김 프로세스 실행에 실패했습니다.");
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL BundledToolFilesExist(void) {
     if (!g_tools_dir[0]) return FALSE;
-    wchar_t p1[MAX_PATH], p2[MAX_PATH], p3[MAX_PATH];
+    wchar_t p1[MAX_PATH], p2[MAX_PATH], p3[MAX_PATH], p4[MAX_PATH];
     StringCchPrintfW(p1, MAX_PATH, L"%s\\yt-dlp.exe", g_tools_dir);
     StringCchPrintfW(p2, MAX_PATH, L"%s\\ffmpeg.exe", g_tools_dir);
     StringCchPrintfW(p3, MAX_PATH, L"%s\\ffprobe.exe", g_tools_dir);
-    return FileExistsW2(p1) && FileExistsW2(p2) && FileExistsW2(p3);
+    StringCchPrintfW(p4, MAX_PATH, L"%s\\deno.exe", g_tools_dir);
+    return FileExistsW2(p1) && FileExistsW2(p2) && FileExistsW2(p3) && FileExistsW2(p4);
 }
 
 static BOOL ReadBundleStamp(ULONGLONG expected) {
@@ -441,13 +500,58 @@ static ULONGLONG BundleStampFromAttributes(const WIN32_FILE_ATTRIBUTE_DATA *attr
     return size.QuadPart ^ modified.QuadPart ^ 0x53594D5033504B31ULL;
 }
 
-static BOOL PrepareBundledTools(void) {
-    wchar_t local[MAX_PATH];
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, local))) {
-        return FALSE;
+static BOOL GetPayloadEndOffset(HANDLE executable, LONGLONG file_size, LONGLONG *payload_end) {
+    if (!payload_end || executable == INVALID_HANDLE_VALUE || file_size <= 0) return FALSE;
+    *payload_end = file_size;
+
+    IMAGE_DOS_HEADER dos_header;
+    LARGE_INTEGER position;
+    position.QuadPart = 0;
+    DWORD received = 0;
+    if (!SetFilePointerEx(executable, position, NULL, FILE_BEGIN) ||
+        !ReadFile(executable, &dos_header, sizeof(dos_header), &received, NULL) ||
+        received != sizeof(dos_header) || dos_header.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos_header.e_lfanew <= 0) return TRUE;
+
+    IMAGE_NT_HEADERS64 nt_headers;
+    position.QuadPart = dos_header.e_lfanew;
+    received = 0;
+    if (!SetFilePointerEx(executable, position, NULL, FILE_BEGIN) ||
+        !ReadFile(executable, &nt_headers, sizeof(nt_headers), &received, NULL) ||
+        received != sizeof(nt_headers) || nt_headers.Signature != IMAGE_NT_SIGNATURE ||
+        nt_headers.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return TRUE;
+
+    IMAGE_DATA_DIRECTORY security =
+        nt_headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+    ULONGLONG certificate_end = (ULONGLONG)security.VirtualAddress + security.Size;
+    if (security.VirtualAddress && security.Size &&
+        certificate_end == (ULONGLONG)file_size && security.VirtualAddress >= 16) {
+        *payload_end = security.VirtualAddress;
     }
+    return TRUE;
+}
+
+static BOOL FindBundleFooterEnd(HANDLE executable, LONGLONG search_end, LONGLONG *footer_end) {
+    if (!footer_end || search_end < 16) return FALSE;
+    for (LONGLONG padding = 0; padding <= 7 && search_end - padding >= 16; ++padding) {
+        LARGE_INTEGER position;
+        position.QuadPart = search_end - padding - 8;
+        unsigned char magic[8];
+        DWORD received = 0;
+        if (SetFilePointerEx(executable, position, NULL, FILE_BEGIN) &&
+            ReadFile(executable, magic, sizeof(magic), &received, NULL) &&
+            received == sizeof(magic) && !memcmp(magic, "YTMP3PK1", sizeof(magic))) {
+            *footer_end = search_end - padding;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL PrepareBundledTools(void) {
+    if (!g_local_app_dir[0] && !InitializeAppDataPaths()) return FALSE;
     EnterCriticalSection(&g_tools_lock);
-    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\FebiusYTMP3Downloader\\tools", local);
+    StringCchPrintfW(g_tools_dir, MAX_PATH, L"%s\\tools", g_local_app_dir);
     LeaveCriticalSection(&g_tools_lock);
     SHCreateDirectoryExW(NULL, g_tools_dir, NULL);
 
@@ -468,9 +572,16 @@ static BOOL PrepareBundledTools(void) {
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (in == INVALID_HANDLE_VALUE) return FALSE;
 
+    LONGLONG payload_search_end = total.QuadPart, payload_end = 0;
+    if (!GetPayloadEndOffset(in, total.QuadPart, &payload_search_end) ||
+        !FindBundleFooterEnd(in, payload_search_end, &payload_end)) {
+        CloseHandle(in);
+        return FALSE;
+    }
+
     LARGE_INTEGER footer_pos;
-    footer_pos.QuadPart = -16;
-    if (!SetFilePointerEx(in, footer_pos, NULL, FILE_END)) {
+    footer_pos.QuadPart = payload_end - 16;
+    if (!SetFilePointerEx(in, footer_pos, NULL, FILE_BEGIN)) {
         CloseHandle(in);
         return FALSE;
     }
@@ -485,7 +596,7 @@ static BOOL PrepareBundledTools(void) {
 
     ULONGLONG payload_size = 0;
     memcpy(&payload_size, footer, sizeof(payload_size));
-    if (!payload_size || payload_size > (ULONGLONG)total.QuadPart - 16ULL) {
+    if (!payload_size || payload_size > (ULONGLONG)payload_end - 16ULL) {
         CloseHandle(in);
         return FALSE;
     }
@@ -510,7 +621,7 @@ static BOOL PrepareBundledTools(void) {
     }
 
     LARGE_INTEGER start;
-    start.QuadPart = total.QuadPart - 16 - (LONGLONG)payload_size;
+    start.QuadPart = payload_end - 16 - (LONGLONG)payload_size;
     if (!SetFilePointerEx(in, start, NULL, FILE_BEGIN)) {
         CloseHandle(out);
         CloseHandle(in);
@@ -547,10 +658,14 @@ static BOOL PrepareBundledTools(void) {
         return FALSE;
     }
 
-    wchar_t command[4096];
-    const wchar_t *const tar_args[] = { L"tar.exe", L"-xf", zip_path, L"-C", g_tools_dir };
-    BOOL extracted = CommandLine_Build(command, 4096, tar_args, sizeof(tar_args) / sizeof(tar_args[0])) &&
-                     RunHiddenProcess(command);
+    wchar_t command[4096], system_dir[MAX_PATH] = L"", tar_path[MAX_PATH] = L"";
+    DWORD system_length = GetSystemDirectoryW(system_dir, MAX_PATH);
+    BOOL have_system_dir = system_length > 0 && system_length < MAX_PATH;
+    if (have_system_dir) StringCchPrintfW(tar_path, MAX_PATH, L"%s\\tar.exe", system_dir);
+    const wchar_t *const tar_args[] = { tar_path, L"-xf", zip_path, L"-C", g_tools_dir };
+    BOOL extracted = have_system_dir && FileExistsW2(tar_path) &&
+                     CommandLine_Build(command, 4096, tar_args, sizeof(tar_args) / sizeof(tar_args[0])) &&
+                     RunHiddenProcess(command, 120000);
     if (!extracted) {
         wchar_t escaped_zip[MAX_PATH * 2];
         wchar_t escaped_tools[MAX_PATH * 2];
@@ -560,13 +675,19 @@ static BOOL PrepareBundledTools(void) {
             SUCCEEDED(StringCchPrintfW(script, 2048,
                 L"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force",
                 escaped_zip, escaped_tools))) {
+            wchar_t powershell_path[MAX_PATH];
+            if (FAILED(StringCchPrintfW(powershell_path, MAX_PATH,
+                    L"%s\\WindowsPowerShell\\v1.0\\powershell.exe", system_dir))) {
+                powershell_path[0] = 0;
+            }
             const wchar_t *const powershell_args[] = {
-                L"powershell.exe", L"-NoProfile", L"-NonInteractive",
+                powershell_path, L"-NoProfile", L"-NonInteractive",
                 L"-ExecutionPolicy", L"Bypass", L"-Command", script
             };
-            extracted = CommandLine_Build(command, 4096, powershell_args,
+            extracted = have_system_dir && FileExistsW2(powershell_path) &&
+                        CommandLine_Build(command, 4096, powershell_args,
                                           sizeof(powershell_args) / sizeof(powershell_args[0])) &&
-                        RunHiddenProcess(command);
+                        RunHiddenProcess(command, 120000);
         }
     }
     DeleteFileW(zip_path);
@@ -583,19 +704,47 @@ static void RefreshTools(void) {
     g_ytdlp[0] = 0;
     g_ffmpeg[0] = 0;
     g_ffmpeg_dir[0] = 0;
+    g_deno[0] = 0;
     FindTool(L"yt-dlp.exe", g_ytdlp, MAX_PATH);
     if (FindTool(L"ffmpeg.exe", g_ffmpeg, MAX_PATH)) {
         DirectoryFromPath(g_ffmpeg, g_ffmpeg_dir, MAX_PATH);
     }
+    FindTool(L"deno.exe", g_deno, MAX_PATH);
     LeaveCriticalSection(&g_tools_lock);
 }
 
 static BOOL ToolsAvailable(void) {
     EnterCriticalSection(&g_tools_lock);
-    BOOL available = g_ytdlp[0] && g_ffmpeg[0] &&
-                     FileExistsW2(g_ytdlp) && FileExistsW2(g_ffmpeg);
+    BOOL available = g_ytdlp[0] && g_ffmpeg[0] && g_deno[0] &&
+                     FileExistsW2(g_ytdlp) && FileExistsW2(g_ffmpeg) && FileExistsW2(g_deno);
     LeaveCriticalSection(&g_tools_lock);
     return available;
+}
+
+static BOOL ToolExecutableWorks(const wchar_t *path, const wchar_t *argument) {
+    if (!path || !*path || !FileExistsW2(path)) return FALSE;
+    wchar_t command[MAX_PATH * 2];
+    const wchar_t *const arguments[] = { path, argument };
+    if (!CommandLine_Build(command, MAX_PATH * 2, arguments,
+                           sizeof(arguments) / sizeof(arguments[0]))) return FALSE;
+    ProcessResult result;
+    return Process_RunHidden(command, g_cancel_event, 30000, &result) &&
+           !result.cancelled && !result.timed_out && result.exit_code == 0;
+}
+
+static BOOL HasCommandLineSwitch(const wchar_t *wanted) {
+    int count = 0;
+    LPWSTR *arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments) return FALSE;
+    BOOL found = FALSE;
+    for (int i = 1; i < count; ++i) {
+        if (!_wcsicmp(arguments[i], wanted)) {
+            found = TRUE;
+            break;
+        }
+    }
+    LocalFree(arguments);
+    return found;
 }
 
 static void TrimInPlace(wchar_t *s) {
@@ -746,10 +895,91 @@ static void UpdatePreviewFromSelection(void) {
     }
 }
 
+static void ApplyManualFilename(void) {
+    if (InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) return;
+    int selected = ListView_GetNextItem(g_list, -1, LVNI_SELECTED);
+    if (selected < 0) return;
+    if (GetWindowTextLengthW(g_clean_title) >= CLEAN_NAME_CCH - 1) {
+        MessageBoxW(g_main, L"파일명이 너무 깁니다.", APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    wchar_t filename[CLEAN_NAME_CCH];
+    GetWindowTextW(g_clean_title, filename, CLEAN_NAME_CCH);
+    TrimInPlace(filename);
+    size_t length = wcslen(filename);
+    if (!length || (length == 4 && !_wcsicmp(filename, L".mp3"))) {
+        MessageBoxW(g_main, L"파일 이름을 입력해 주세요.", APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (length < 4 || _wcsicmp(filename + length - 4, L".mp3")) {
+        if (FAILED(StringCchCatW(filename, CLEAN_NAME_CCH, L".mp3"))) {
+            MessageBoxW(g_main, L"파일명이 너무 깁니다.", APP_TITLE, MB_OK | MB_ICONWARNING);
+            return;
+        }
+    }
+    if (!Filename_IsSafe(filename)) {
+        MessageBoxW(g_main,
+            L"Windows에서 사용할 수 없는 파일명입니다. 경로 문자와 예약 이름을 제거해 주세요.",
+            APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    EnterCriticalSection(&g_jobs_lock);
+    if (selected < g_job_count) {
+        StringCchCopyW(g_jobs[selected].clean_name, CLEAN_NAME_CCH, filename);
+        g_jobs[selected].custom_name = TRUE;
+    }
+    LeaveCriticalSection(&g_jobs_lock);
+    SetWindowTextW(g_clean_title, filename);
+    UpdateListRow(selected);
+    Logger_Write(L"filename", L"사용자 지정 파일명을 적용했습니다.");
+}
+
+static void SetDownloadUiBusy(BOOL busy) {
+    EnableWindow(g_url_edit, !busy);
+    EnableWindow(GetDlgItem(g_main, IDC_ADD_LINKS), !busy);
+    EnableWindow(g_folder_edit, !busy);
+    EnableWindow(GetDlgItem(g_main, IDC_FOLDER_BROWSE), !busy);
+    EnableWindow(g_clean_title, !busy);
+    EnableWindow(g_apply_filename, !busy);
+    EnableWindow(g_download_button, !busy);
+    EnableWindow(g_cancel_button, busy);
+
+    const UINT menu_ids[] = {
+        IDM_FILE_LOAD_TXT, IDM_FILE_BROWSE_FOLDER, IDM_JOB_ADD_LINKS,
+        IDM_JOB_REMOVE_DUP, IDM_JOB_DOWNLOAD_ALL, IDM_JOB_RETRY_FAILED,
+        IDM_JOB_CLEAR, IDM_JOB_DELETE_SELECTED, IDM_OPT_DEDUP, IDM_OPT_SKIP,
+        IDM_OPT_SANITIZE, IDM_OPT_CLEAN, IDM_OPT_SIZE,
+        IDM_QUALITY_128, IDM_QUALITY_192, IDM_QUALITY_256, IDM_QUALITY_320,
+        IDM_TOOLS_OPEN_HISTORY
+    };
+    HMENU menu = GetMenu(g_main);
+    UINT state = MF_BYCOMMAND | (busy ? MF_GRAYED : MF_ENABLED);
+    for (size_t i = 0; menu && i < sizeof(menu_ids) / sizeof(menu_ids[0]); ++i) {
+        EnableMenuItem(menu, menu_ids[i], state);
+    }
+    DrawMenuBar(g_main);
+}
+
+static void RequestCancellation(void) {
+    if (g_cancel_event) SetEvent(g_cancel_event);
+    EnableWindow(g_cancel_button, FALSE);
+    SetControlText(g_status, L"상태: 취소 요청 중...");
+    Logger_Write(L"cancel", L"사용자가 작업 취소를 요청했습니다.");
+}
+
+static void CloseAfterWorkersIfRequested(void) {
+    if (!InterlockedCompareExchange((LONG *)&g_close_after_cancel, 0, 0)) return;
+    if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) return;
+    DestroyWindow(g_main);
+}
+
 static void RecomputeNames(void) {
     EnterCriticalSection(&g_jobs_lock);
     for (int i = 0; i < g_job_count; ++i) {
-        if (g_jobs[i].raw_title[0]) {
+        if (g_jobs[i].raw_title[0] && !g_jobs[i].custom_name) {
             BuildCleanFilename(&g_jobs[i], g_jobs[i].clean_name, CLEAN_NAME_CCH);
         }
     }
@@ -823,71 +1053,6 @@ static void Utf8ToWide(const char *src, wchar_t *dst, size_t cch) {
     if (cch) dst[cch - 1] = 0;
 }
 
-typedef void (*ProcessLineCallback)(const char *line, void *ctx);
-
-static BOOL RunProcessLines(const wchar_t *command, ProcessLineCallback callback, void *ctx, DWORD *exit_code) {
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    HANDLE read_pipe = NULL, write_pipe = NULL;
-    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) return FALSE;
-    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = write_pipe;
-    si.hStdError = write_pipe;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-
-    wchar_t *cmd = _wcsdup(command);
-    if (!cmd) {
-        CloseHandle(read_pipe);
-        CloseHandle(write_pipe);
-        return FALSE;
-    }
-
-    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    free(cmd);
-    CloseHandle(write_pipe);
-    if (!ok) {
-        CloseHandle(read_pipe);
-        return FALSE;
-    }
-
-    char chunk[4096];
-    char line[16384];
-    size_t line_len = 0;
-    DWORD got = 0;
-    while (ReadFile(read_pipe, chunk, sizeof(chunk), &got, NULL) && got) {
-        for (DWORD i = 0; i < got; ++i) {
-            char c = chunk[i];
-            if (c == '\n') {
-                line[line_len] = 0;
-                if (callback) callback(line, ctx);
-                line_len = 0;
-            } else if (c != '\r') {
-                if (line_len + 1 < sizeof(line)) line[line_len++] = c;
-            }
-        }
-    }
-    if (line_len) {
-        line[line_len] = 0;
-        if (callback) callback(line, ctx);
-    }
-    CloseHandle(read_pipe);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    if (exit_code) *exit_code = code;
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return TRUE;
-}
-
 static void MetadataLineCallbackFn(const char *line, void *ctx) {
     MetadataLines *m = (MetadataLines *)ctx;
     wchar_t wline[4096];
@@ -928,8 +1093,16 @@ static BOOL FetchMetadataForJob(int index) {
     LeaveCriticalSection(&g_jobs_lock);
     PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
 
-    wchar_t print_template[512];
+    wchar_t print_template[512], js_runtime[MAX_PATH + 16];
     wchar_t command[8192];
+    if (FAILED(StringCchPrintfW(js_runtime, MAX_PATH + 16, L"deno:%s", g_deno))) {
+        EnterCriticalSection(&g_jobs_lock);
+        g_jobs[index].status = JOB_FAILED;
+        StringCchCopyW(g_jobs[index].error, 768, L"JavaScript 런타임 경로가 너무 깁니다.");
+        LeaveCriticalSection(&g_jobs_lock);
+        PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
+        return FALSE;
+    }
     if (FAILED(StringCchPrintfW(print_template, 512,
             L"META:%%(id)s%s%%(title)s%s%%(artist)s%s%%(track)s%s%%(duration)s",
             META_SEP, META_SEP, META_SEP, META_SEP))) {
@@ -941,7 +1114,9 @@ static BOOL FetchMetadataForJob(int index) {
         return FALSE;
     }
     const wchar_t *const arguments[] = {
-        g_ytdlp, L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
+        g_ytdlp, L"--ignore-config", L"--no-update", L"--encoding", L"utf-8", L"--no-playlist",
+        L"--js-runtimes", js_runtime, L"--socket-timeout", L"30",
+        L"--retries", L"3", L"--extractor-retries", L"3",
         L"--skip-download", L"--quiet", L"--no-warnings", L"--print", print_template,
         L"--", url
     };
@@ -956,13 +1131,18 @@ static BOOL FetchMetadataForJob(int index) {
 
     MetadataLines lines;
     ZeroMemory(&lines, sizeof(lines));
-    DWORD code = 1;
-    BOOL ran = RunProcessLines(command, MetadataLineCallbackFn, &lines, &code);
-    if (!ran || code != 0 || !lines.meta[0]) {
+    ProcessResult process_result;
+    BOOL ran = Process_RunLines(command, MetadataLineCallbackFn, &lines,
+                                g_cancel_event, 120000, &process_result);
+    if (!ran || process_result.exit_code != 0 || !lines.meta[0]) {
+        const wchar_t *failure = process_result.cancelled ? L"사용자가 정보 조회를 취소했습니다." :
+                                 process_result.timed_out ? L"영상 정보 조회 시간이 초과되었습니다." :
+                                 lines.last[0] ? lines.last : L"영상 정보를 가져오지 못했습니다.";
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchCopyW(g_jobs[index].error, 768, lines.last[0] ? lines.last : L"영상 정보를 가져오지 못했습니다.");
+        StringCchCopyW(g_jobs[index].error, 768, failure);
         LeaveCriticalSection(&g_jobs_lock);
+        Logger_Write(L"metadata", failure);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
     }
@@ -1028,7 +1208,15 @@ static unsigned __stdcall MetadataWorker(void *param) {
     for (;;) {
         int index = (int)InterlockedIncrement(&work->next) - 1;
         if (index >= work->end) break;
-        FetchMetadataForJob(index);
+        if (g_cancel_event && WaitForSingleObject(g_cancel_event, 0) == WAIT_OBJECT_0) {
+            EnterCriticalSection(&g_jobs_lock);
+            g_jobs[index].status = JOB_FAILED;
+            StringCchCopyW(g_jobs[index].error, 768, L"사용자가 정보 조회를 취소했습니다.");
+            LeaveCriticalSection(&g_jobs_lock);
+            PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
+        } else {
+            FetchMetadataForJob(index);
+        }
     }
     return 0;
 }
@@ -1069,6 +1257,7 @@ static BOOL UrlAlreadyQueuedUnlocked(const wchar_t *url) {
 static void StartMetadataBatch(int start, int end) {
     if (start >= end) return;
     if (InterlockedCompareExchange((LONG *)&g_meta_running, 1, 0) != 0) return;
+    ResetEvent(g_cancel_event);
     MetaBatch *batch = (MetaBatch *)malloc(sizeof(MetaBatch));
     if (!batch) {
         InterlockedExchange((LONG *)&g_meta_running, 0);
@@ -1091,7 +1280,7 @@ static void AddUrlsFromEdit(void) {
         return;
     }
     if (!ToolsAvailable()) {
-        MessageBoxW(g_main, L"yt-dlp.exe와 ffmpeg.exe를 찾을 수 없습니다.",
+        MessageBoxW(g_main, L"내장 yt-dlp, FFmpeg 또는 Deno를 준비하지 못했습니다.",
                     APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
@@ -1207,6 +1396,7 @@ static void LoadTxtFile(void) {
 }
 
 static void BrowseFolder(void) {
+    if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) return;
     BROWSEINFOW bi;
     ZeroMemory(&bi, sizeof(bi));
     bi.hwndOwner = g_main;
@@ -1253,102 +1443,6 @@ static void DeleteSelected(void) {
     UpdatePreviewFromSelection();
 }
 
-static void HistoryPath(const wchar_t *folder, wchar_t *out, size_t cch) {
-    StringCchPrintfW(out, cch, L"%s\\download_history.txt", folder);
-}
-
-static unsigned HistoryHash(const wchar_t *id) {
-    unsigned hash = 2166136261u;
-    for (size_t i = 0; id[i]; ++i) {
-        hash ^= (unsigned)towlower(id[i]);
-        hash *= 16777619u;
-    }
-    return hash % (unsigned)(sizeof(g_history) / sizeof(g_history[0]));
-}
-
-static BOOL HistoryContainsUnlocked(const wchar_t *id) {
-    unsigned bucket = HistoryHash(id);
-    for (HistoryNode *node = g_history[bucket]; node; node = node->next) {
-        if (!_wcsicmp(node->id, id)) return TRUE;
-    }
-    return FALSE;
-}
-
-static void HistoryInsertUnlocked(const wchar_t *id) {
-    if (!id[0] || HistoryContainsUnlocked(id)) return;
-    HistoryNode *node = (HistoryNode *)calloc(1, sizeof(HistoryNode));
-    if (!node) return;
-    StringCchCopyW(node->id, 128, id);
-    unsigned bucket = HistoryHash(id);
-    node->next = g_history[bucket];
-    g_history[bucket] = node;
-}
-
-static void HistoryClearUnlocked(void) {
-    for (size_t i = 0; i < sizeof(g_history) / sizeof(g_history[0]); ++i) {
-        HistoryNode *node = g_history[i];
-        while (node) {
-            HistoryNode *next = node->next;
-            free(node);
-            node = next;
-        }
-        g_history[i] = NULL;
-    }
-}
-
-static void HistoryEnsureLoaded(const wchar_t *folder) {
-    wchar_t path[MAX_PATH];
-    HistoryPath(folder, path, MAX_PATH);
-    EnterCriticalSection(&g_history_lock);
-    if (!_wcsicmp(g_history_folder, folder)) {
-        LeaveCriticalSection(&g_history_lock);
-        return;
-    }
-    HistoryClearUnlocked();
-    StringCchCopyW(g_history_folder, MAX_PATH, folder);
-    FILE *f = _wfopen(path, L"rb");
-    if (!f) {
-        LeaveCriticalSection(&g_history_lock);
-        return;
-    }
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        size_t n = strlen(line);
-        while (n && (line[n - 1] == '\r' || line[n - 1] == '\n')) line[--n] = 0;
-        wchar_t id[128];
-        if (MultiByteToWideChar(CP_UTF8, 0, line, -1, id, 128)) HistoryInsertUnlocked(id);
-    }
-    fclose(f);
-    LeaveCriticalSection(&g_history_lock);
-}
-
-static BOOL HistoryContains(const wchar_t *id) {
-    EnterCriticalSection(&g_history_lock);
-    BOOL found = HistoryContainsUnlocked(id);
-    LeaveCriticalSection(&g_history_lock);
-    return found;
-}
-
-static void HistoryAppend(const wchar_t *folder, const wchar_t *id) {
-    if (!id[0]) return;
-    EnterCriticalSection(&g_history_lock);
-    if (HistoryContainsUnlocked(id)) {
-        LeaveCriticalSection(&g_history_lock);
-        return;
-    }
-    wchar_t path[MAX_PATH];
-    HistoryPath(folder, path, MAX_PATH);
-    FILE *f = _wfopen(path, L"ab");
-    if (f) {
-        char id8[256];
-        WideCharToMultiByte(CP_UTF8, 0, id, -1, id8, sizeof(id8), NULL, NULL);
-        fprintf(f, "%s\r\n", id8);
-        fclose(f);
-        HistoryInsertUnlocked(id);
-    }
-    LeaveCriticalSection(&g_history_lock);
-}
-
 static BOOL MakeUniqueDestination(const wchar_t *folder, const wchar_t *filename, wchar_t *out, size_t cch) {
     if (FAILED(StringCchPrintfW(out, cch, L"%s\\%s", folder, filename))) return FALSE;
     if (!FileExistsW2(out)) return TRUE;
@@ -1362,6 +1456,79 @@ static BOOL MakeUniqueDestination(const wchar_t *folder, const wchar_t *filename
         if (!FileExistsW2(out)) return TRUE;
     }
     return FALSE;
+}
+
+static BOOL GetTempRoot(wchar_t *out, size_t cch) {
+    wchar_t system_temp[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, system_temp);
+    if (!length || length >= MAX_PATH ||
+        FAILED(StringCchPrintfW(out, cch, L"%sFebiusYTMP3Downloader", system_temp))) return FALSE;
+    return SHCreateDirectoryExW(NULL, out, NULL) == ERROR_SUCCESS || DirectoryExistsW2(out);
+}
+
+static void DeleteTempTree(const wchar_t *directory) {
+    if (!directory || !*directory || !DirectoryExistsW2(directory)) return;
+    wchar_t pattern[MAX_PATH];
+    if (FAILED(StringCchPrintfW(pattern, MAX_PATH, L"%s\\*", directory))) return;
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(pattern, &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(data.cFileName, L".") || !wcscmp(data.cFileName, L"..")) continue;
+            wchar_t child[MAX_PATH];
+            if (FAILED(StringCchPrintfW(child, MAX_PATH, L"%s\\%s", directory, data.cFileName))) continue;
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) DeleteTempTree(child);
+                RemoveDirectoryW(child);
+            } else {
+                SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child);
+            }
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    RemoveDirectoryW(directory);
+}
+
+static BOOL CreateBatchTempDirectory(wchar_t *out, size_t cch) {
+    wchar_t root[MAX_PATH];
+    if (!GetTempRoot(root, MAX_PATH)) return FALSE;
+    for (DWORD attempt = 0; attempt < 100; ++attempt) {
+        if (FAILED(StringCchPrintfW(out, cch, L"%s\\batch-%lu-%llu-%lu", root,
+                GetCurrentProcessId(), GetTickCount64(), attempt))) return FALSE;
+        if (CreateDirectoryW(out, NULL)) return TRUE;
+        if (GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    }
+    return FALSE;
+}
+
+static void CleanupOrphanTempDirectories(void) {
+    wchar_t root[MAX_PATH], pattern[MAX_PATH];
+    if (!GetTempRoot(root, MAX_PATH) ||
+        FAILED(StringCchPrintfW(pattern, MAX_PATH, L"%s\\batch-*", root))) return;
+    FILETIME now_file_time;
+    GetSystemTimeAsFileTime(&now_file_time);
+    ULARGE_INTEGER now;
+    now.LowPart = now_file_time.dwLowDateTime;
+    now.HighPart = now_file_time.dwHighDateTime;
+    const ULONGLONG one_day = 24ULL * 60ULL * 60ULL * 10000000ULL;
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        ULARGE_INTEGER modified;
+        modified.LowPart = data.ftLastWriteTime.dwLowDateTime;
+        modified.HighPart = data.ftLastWriteTime.dwHighDateTime;
+        if (now.QuadPart >= modified.QuadPart && now.QuadPart - modified.QuadPart >= one_day) {
+            wchar_t child[MAX_PATH];
+            if (SUCCEEDED(StringCchPrintfW(child, MAX_PATH, L"%s\\%s", root, data.cFileName))) {
+                DeleteTempTree(child);
+            }
+        }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
 }
 
 static void DownloadLineCallbackFn(const char *line, void *ctx) {
@@ -1410,7 +1577,8 @@ static BOOL SnapshotDownloadJob(int index, DownloadJobSnapshot *snapshot) {
     return TRUE;
 }
 
-static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
+static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_dir,
+                        int bitrate, BOOL skip_existing) {
     DownloadJobSnapshot job;
     if (!SnapshotDownloadJob(index, &job)) return FALSE;
 
@@ -1427,12 +1595,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
             L"안전하지 않거나 Windows에서 사용할 수 없는 파일명입니다. 파일명 자동 제거 옵션을 켜 주세요.");
     }
 
-    wchar_t final_path[MAX_PATH];
-    if (FAILED(StringCchPrintfW(final_path, MAX_PATH, L"%s\\%s", folder, job.clean_name))) {
-        return FailDownloadJob(index, L"저장 경로가 너무 깁니다. 더 짧은 폴더를 선택해 주세요.");
-    }
-    BOOL skip = InterlockedCompareExchange((LONG *)&g_opt_skip, 0, 0) ? TRUE : FALSE;
-    if (skip && (HistoryContains(job.video_id) || FileExistsW2(final_path))) {
+    if (skip_existing && History_ShouldSkip(folder, job.video_id, job.clean_name, bitrate)) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_SKIPPED;
         g_jobs[index].progress = 100;
@@ -1441,10 +1604,12 @@ static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
         return TRUE;
     }
 
-    if (!g_ytdlp[0] || !g_ffmpeg[0]) {
+    if (!g_ytdlp[0] || !g_ffmpeg[0] || !g_deno[0]) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchCopyW(g_jobs[index].error, 768, !g_ytdlp[0] ? L"yt-dlp.exe를 찾을 수 없습니다." : L"ffmpeg.exe를 찾을 수 없습니다.");
+        StringCchCopyW(g_jobs[index].error, 768,
+            !g_ytdlp[0] ? L"yt-dlp.exe를 찾을 수 없습니다." :
+            !g_ffmpeg[0] ? L"ffmpeg.exe를 찾을 수 없습니다." : L"deno.exe를 찾을 수 없습니다.");
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1459,18 +1624,23 @@ static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
 
     wchar_t output_template[MAX_PATH * 2];
     if (FAILED(StringCchPrintfW(output_template, MAX_PATH * 2,
-                               L"%s\\%s.%d.%%(ext)s", folder, job.video_id, index))) {
+                               L"%s\\%s.%d.%%(ext)s", temp_dir, job.video_id, index))) {
         return FailDownloadJob(index, L"임시 다운로드 경로가 너무 깁니다.");
     }
 
-    wchar_t command[8192];
+    wchar_t command[8192], js_runtime[MAX_PATH + 16];
     wchar_t audio_quality[16];
     StringCchPrintfW(audio_quality, 16, L"%dK", bitrate);
+    if (FAILED(StringCchPrintfW(js_runtime, MAX_PATH + 16, L"deno:%s", g_deno))) {
+        return FailDownloadJob(index, L"JavaScript 런타임 경로가 너무 깁니다.");
+    }
     const wchar_t *const arguments[] = {
-        g_ytdlp, L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
+        g_ytdlp, L"--ignore-config", L"--no-update", L"--encoding", L"utf-8", L"--no-playlist",
+        L"--js-runtimes", js_runtime, L"--socket-timeout", L"30",
+        L"--retries", L"3", L"--fragment-retries", L"3", L"--extractor-retries", L"3",
         L"--no-warnings", L"--newline", L"--no-color", L"--force-overwrites",
         L"-f", L"bestaudio/best", L"-x", L"--audio-format", L"mp3",
-        L"--audio-quality", audio_quality, L"--ffmpeg-location", g_ffmpeg_dir,
+        L"--audio-quality", audio_quality, L"--embed-metadata", L"--ffmpeg-location", g_ffmpeg_dir,
         L"--progress-template", L"download:PROGRESS:%(progress._percent_str)s",
         L"-o", output_template, L"--", job.url
     };
@@ -1482,19 +1652,24 @@ static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
     ZeroMemory(&lines, sizeof(lines));
     lines.index = index;
     lines.last_progress = -1;
-    DWORD code = 1;
-    BOOL ran = RunProcessLines(command, DownloadLineCallbackFn, &lines, &code);
-    if (!ran || code != 0) {
+    ProcessResult process_result;
+    BOOL ran = Process_RunLines(command, DownloadLineCallbackFn, &lines,
+                                g_cancel_event, 30 * 60 * 1000, &process_result);
+    if (!ran || process_result.exit_code != 0) {
+        const wchar_t *failure = process_result.cancelled ? L"사용자가 다운로드를 취소했습니다." :
+                                 process_result.timed_out ? L"다운로드 시간이 30분을 초과했습니다." :
+                                 lines.last[0] ? lines.last : L"다운로드 또는 MP3 변환에 실패했습니다.";
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchCopyW(g_jobs[index].error, 768, lines.last[0] ? lines.last : L"다운로드 또는 MP3 변환에 실패했습니다.");
+        StringCchCopyW(g_jobs[index].error, 768, failure);
         LeaveCriticalSection(&g_jobs_lock);
+        Logger_Write(L"download", failure);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
     }
 
     wchar_t temp_mp3[MAX_PATH];
-    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\%s.%d.mp3", folder, job.video_id, index))) {
+    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\%s.%d.mp3", temp_dir, job.video_id, index))) {
         return FailDownloadJob(index, L"변환 파일 경로가 너무 깁니다.");
     }
     if (!FileExistsW2(temp_mp3)) {
@@ -1528,7 +1703,11 @@ static BOOL DownloadOne(int index, const wchar_t *folder, int bitrate) {
         return FALSE;
     }
 
-    HistoryAppend(folder, job.video_id);
+    const wchar_t *actual_filename = wcsrchr(dest, L'\\');
+    actual_filename = actual_filename ? actual_filename + 1 : dest;
+    if (!History_Record(folder, job.video_id, actual_filename, bitrate)) {
+        Logger_Write(L"history", L"다운로드 기록을 저장하지 못했습니다.");
+    }
     EnterCriticalSection(&g_jobs_lock);
     g_jobs[index].status = JOB_DONE;
     g_jobs[index].progress = 100;
@@ -1542,7 +1721,12 @@ static unsigned __stdcall DownloadWorker(void *param) {
     for (;;) {
         int slot = (int)InterlockedIncrement(&work->next) - 1;
         if (slot >= work->total) break;
-        DownloadOne(work->indices[slot], work->folder, work->bitrate);
+        if (g_cancel_event && WaitForSingleObject(g_cancel_event, 0) == WAIT_OBJECT_0) {
+            FailDownloadJob(work->indices[slot], L"사용자가 다운로드를 취소했습니다.");
+        } else {
+            DownloadOne(work->indices[slot], work->folder, work->temp_dir,
+                        work->bitrate, work->skip_existing);
+        }
         int done = (int)InterlockedIncrement(&work->done);
         PostMessageW(g_main, WM_APP_OVERALL, done, work->total);
     }
@@ -1555,7 +1739,9 @@ static unsigned __stdcall DownloadThread(void *param) {
     DownloadWork work;
     ZeroMemory(&work, sizeof(work));
     StringCchCopyW(work.folder, MAX_PATH, batch->folder);
+    StringCchCopyW(work.temp_dir, MAX_PATH, batch->temp_dir);
     work.bitrate = batch->bitrate;
+    work.skip_existing = batch->skip_existing;
     free(batch);
 
     EnterCriticalSection(&g_jobs_lock);
@@ -1579,6 +1765,8 @@ static unsigned __stdcall DownloadThread(void *param) {
     if (worker_count) WaitForMultipleObjects(worker_count, workers, TRUE, INFINITE);
     for (DWORD i = 0; i < worker_count; ++i) CloseHandle(workers[i]);
 
+    DeleteTempTree(work.temp_dir);
+    Logger_Write(L"download", L"다운로드 배치가 종료되었습니다.");
     InterlockedExchange((LONG *)&g_download_running, 0);
     PostMessageW(g_main, WM_APP_DOWNLOAD_DONE, work.total, 0);
     return 0;
@@ -1615,11 +1803,12 @@ static void StartDownload(BOOL failed_only) {
     if (!ToolsAvailable()) {
         InterlockedExchange((LONG *)&g_download_running, 0);
         MessageBoxW(g_main,
-            L"yt-dlp.exe와 ffmpeg.exe가 필요합니다.\r\n\r\n프로그램과 같은 폴더에 두거나 PATH에 등록해 주세요.",
+            L"내장 yt-dlp, FFmpeg 또는 Deno를 준비하지 못했습니다.\r\n\r\n"
+            L"프로그램을 다시 실행하거나 최신 공식 릴리스를 받아 주세요.",
             APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
-    HistoryEnsureLoaded(folder);
+    History_EnsureLoaded(folder);
 
     DownloadBatch *batch = (DownloadBatch *)malloc(sizeof(DownloadBatch));
     if (!batch) {
@@ -1628,15 +1817,27 @@ static void StartDownload(BOOL failed_only) {
     }
     batch->failed_only = failed_only;
     batch->bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
+    batch->skip_existing = InterlockedCompareExchange((LONG *)&g_opt_skip, 0, 0) ? TRUE : FALSE;
     StringCchCopyW(batch->folder, MAX_PATH, folder);
+    if (!CreateBatchTempDirectory(batch->temp_dir, MAX_PATH)) {
+        free(batch);
+        InterlockedExchange((LONG *)&g_download_running, 0);
+        MessageBoxW(g_main, L"안전한 임시 작업 폴더를 만들 수 없습니다.", APP_TITLE, MB_OK | MB_ICONERROR);
+        return;
+    }
+    ResetEvent(g_cancel_event);
     SetControlText(g_status, L"다운로드 준비 중...");
     SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+    SetDownloadUiBusy(TRUE);
+    Logger_Write(L"download", L"다운로드 배치를 시작했습니다.");
 
     uintptr_t th = _beginthreadex(NULL, 0, DownloadThread, batch, 0, NULL);
     if (th) CloseHandle((HANDLE)th);
     else {
+        DeleteTempTree(batch->temp_dir);
         free(batch);
         InterlockedExchange((LONG *)&g_download_running, 0);
+        SetDownloadUiBusy(FALSE);
     }
 }
 
@@ -1647,6 +1848,8 @@ static unsigned __stdcall ToolPreparationThread(void *param) {
     SetStartupPhase(3);
     RefreshTools();
     BOOL available = ToolsAvailable();
+    Logger_Write(L"tools", available ? L"내장 도구 준비를 완료했습니다." :
+                                      L"내장 도구 준비에 실패했습니다.");
     InterlockedExchange((LONG *)&g_tools_loading, 0);
     PostMessageW(g_main, WM_APP_TOOLS_READY, available, 0);
     return 0;
@@ -1664,7 +1867,8 @@ static void StartToolPreparation(void) {
 
 static HWND AddCtl(DWORD ex, const wchar_t *cls, const wchar_t *text, DWORD style,
                    int x, int y, int w, int h, int id, HWND parent) {
-    HWND ctrl = CreateWindowExW(ex, cls, text, style, x, y, w, h, parent,
+    HWND ctrl = CreateWindowExW(ex, cls, text, style,
+                                ScaleUi(x), ScaleUi(y), ScaleUi(w), ScaleUi(h), parent,
                                 (HMENU)(INT_PTR)id, g_instance, NULL);
     ApplyClassic(ctrl);
     return ctrl;
@@ -1680,7 +1884,7 @@ static void InitListColumns(void) {
         ZeroMemory(&c, sizeof(c));
         c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
         c.pszText = (LPWSTR)cols[i].name;
-        c.cx = cols[i].width;
+        c.cx = ScaleUi(cols[i].width);
         c.iSubItem = i;
         ListView_InsertColumn(g_list, i, &c);
     }
@@ -1710,7 +1914,7 @@ static void UpdateStatusBarLayout(HWND hwnd) {
     SendMessageW(g_status, WM_SIZE, 0, 0);
     RECT client;
     GetClientRect(hwnd, &client);
-    int parts[2] = { client.right - 145, -1 };
+    int parts[2] = { client.right - ScaleUi(145), -1 };
     SendMessageW(g_status, SB_SETPARTS, 2, (LPARAM)parts);
     wchar_t quality[48];
     int bitrate = (int)InterlockedCompareExchange((LONG *)&g_audio_bitrate, 0, 0);
@@ -1771,6 +1975,12 @@ static void SetAudioBitrate(int bitrate) {
 }
 
 static void ToggleBooleanOption(int id) {
+    if (id != IDM_OPT_AUTO_UPDATE &&
+        InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) {
+        MessageBoxW(g_main, L"다운로드가 끝난 뒤 옵션을 변경해 주세요.",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     volatile LONG *target = NULL;
     const wchar_t *setting_name = NULL;
     BOOL rebuild_names = FALSE, rebuild_list = FALSE;
@@ -1837,6 +2047,7 @@ static HMENU CreateAppMenu(void) {
 
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_REFRESH_STATS, L"폴더 정보 새로 고침");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
+    AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_LOG, L"진단 로그 열기");
     AppendMenuW(help, MF_STRING, IDM_HELP_CHECK_UPDATES, L"업데이트 확인...");
     AppendMenuW(help, MF_STRING, IDM_HELP_RELEASES, L"릴리스 정보 보기");
     AppendMenuW(help, MF_SEPARATOR, 0, NULL);
@@ -1852,20 +2063,20 @@ static HMENU CreateAppMenu(void) {
 }
 
 static void CreateUi(HWND hwnd) {
-    g_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_font = CreateFontW(-ScaleUi(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                          HANGEUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                          NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
 
     AddCtl(0, L"BUTTON", L"1. 유튜브 링크", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
            8, 6, 944, 130, 0, hwnd);
-    g_url_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+    g_url_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
                         18, 25, 924, 70, IDC_URL_EDIT, hwnd);
-    AddCtl(0, L"BUTTON", L"링크 추가 및 조회", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    AddCtl(0, L"BUTTON", L"링크 추가 및 조회", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
            782, 102, 160, 27, IDC_ADD_LINKS, hwnd);
 
     AddCtl(0, L"BUTTON", L"2. 다운로드 대기 목록", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
            8, 142, 944, 272, 0, hwnd);
-    g_list = AddCtl(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
+    g_list = AddCtl(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                     18, 162, 924, 240, IDC_LIST, hwnd);
     InitListColumns();
 
@@ -1877,16 +2088,18 @@ static void CreateUi(HWND hwnd) {
                          82, 439, 860, 23, IDC_RAW_TITLE, hwnd);
     AddCtl(0, L"STATIC", L"정리:", WS_CHILD | WS_VISIBLE,
            20, 470, 58, 20, 0, hwnd);
-    g_clean_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                           82, 466, 860, 23, IDC_CLEAN_TITLE, hwnd);
+    g_clean_title = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                           82, 466, 735, 23, IDC_CLEAN_TITLE, hwnd);
+    g_apply_filename = AddCtl(0, L"BUTTON", L"파일명 적용", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                              825, 465, 117, 25, IDC_APPLY_FILENAME, hwnd);
 
     AddCtl(0, L"BUTTON", L"3. 저장 및 다운로드", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
            8, 501, 944, 112, 0, hwnd);
     AddCtl(0, L"STATIC", L"저장 폴더:", WS_CHILD | WS_VISIBLE,
            20, 523, 68, 20, 0, hwnd);
-    g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+    g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                            88, 518, 720, 24, IDC_FOLDER_EDIT, hwnd);
-    AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
            816, 517, 126, 26, IDC_FOLDER_BROWSE, hwnd);
     g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡  |  총 용량: -", WS_CHILD | WS_VISIBLE,
                             20, 555, 300, 22, IDC_FOLDER_STATS, hwnd);
@@ -1895,8 +2108,10 @@ static void CreateUi(HWND hwnd) {
     SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
                        718, 554, 65, 22, IDC_OVERALL, hwnd);
-    AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-           790, 546, 152, 34, IDC_DOWNLOAD_ALL, hwnd);
+    g_download_button = AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                               765, 546, 120, 34, IDC_DOWNLOAD_ALL, hwnd);
+    g_cancel_button = AddCtl(0, L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
+                             890, 546, 52, 34, IDC_CANCEL_DOWNLOAD, hwnd);
 
     g_status = AddCtl(0, STATUSCLASSNAMEW, L"준비 완료", WS_CHILD | WS_VISIBLE,
                       0, 0, 0, 0, IDC_STATUS, hwnd);
@@ -1918,16 +2133,20 @@ static void ClearJobs(void) {
 }
 
 static void OpenHistoryFile(void) {
+    if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0)) return;
     wchar_t folder[MAX_PATH], path[MAX_PATH];
     GetWindowTextW(g_folder_edit, folder, MAX_PATH);
     if (!DirectoryExistsW2(folder)) SHCreateDirectoryExW(g_main, folder, NULL);
-    HistoryPath(folder, path, MAX_PATH);
+    if (!History_GetPath(folder, path, MAX_PATH)) return;
     FILE *f = _wfopen(path, L"ab");
     if (f) fclose(f);
-    EnterCriticalSection(&g_history_lock);
-    g_history_folder[0] = 0;
-    LeaveCriticalSection(&g_history_lock);
+    History_Invalidate();
     ShellExecuteW(g_main, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void OpenLogFile(void) {
+    const wchar_t *path = Logger_GetPath();
+    if (path && *path) ShellExecuteW(g_main, L"open", path, NULL, NULL, SW_SHOWNORMAL);
 }
 
 static void OpenWebPage(HWND owner, const wchar_t *url) {
@@ -2121,7 +2340,7 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             GetClientRect(hwnd, &client);
             FillRect(dc, &client, GetSysColorBrush(COLOR_BTNFACE));
 
-            RECT banner = {0, 0, client.right, 84};
+            RECT banner = {0, 0, client.right, ScaleUi(84)};
             HBRUSH navy = CreateSolidBrush(RGB(0, 0, 112));
             FillRect(dc, &banner, navy);
             DeleteObject(navy);
@@ -2133,27 +2352,27 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             HFONT old_font = (HFONT)SelectObject(dc, title_font);
             SetTextColor(dc, RGB(255, 255, 255));
-            RECT title = {24, 16, client.right - 20, 49};
+            RECT title = {ScaleUi(24), ScaleUi(16), client.right - ScaleUi(20), ScaleUi(49)};
             DrawTextW(dc, L"Febius", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SelectObject(dc, body_font);
-            RECT subtitle = {26, 51, client.right - 20, 76};
+            RECT subtitle = {ScaleUi(26), ScaleUi(51), client.right - ScaleUi(20), ScaleUi(76)};
             DrawTextW(dc, L"UTILITY SERIES", -1, &subtitle, DT_LEFT | DT_SINGLELINE);
 
             SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
             wchar_t version_text[64];
-            RECT product = {24, 103, client.right - 24, 124};
+            RECT product = {ScaleUi(24), ScaleUi(103), client.right - ScaleUi(24), ScaleUi(124)};
             DrawTextW(dc, L"YT MP3 DOWNLOADER", -1, &product, DT_LEFT | DT_SINGLELINE);
             StringCchPrintfW(version_text, 64, L"Version %s  ·  Windows x64", APP_VERSION_W);
-            RECT version = {24, 130, client.right - 24, 151};
+            RECT version = {ScaleUi(24), ScaleUi(130), client.right - ScaleUi(24), ScaleUi(151)};
             DrawTextW(dc, version_text, -1, &version, DT_LEFT | DT_SINGLELINE);
-            RECT status = {24, 165, client.right - 24, 187};
+            RECT status = {ScaleUi(24), ScaleUi(165), client.right - ScaleUi(24), ScaleUi(187)};
             DrawTextW(dc, StartupStatusText(), -1, &status, DT_LEFT | DT_SINGLELINE);
 
-            RECT progress = {24, 194, client.right - 24, 212};
+            RECT progress = {ScaleUi(24), ScaleUi(194), client.right - ScaleUi(24), ScaleUi(212)};
             DrawEdge(dc, &progress, EDGE_SUNKEN, BF_RECT);
-            InflateRect(&progress, -3, -3);
+            InflateRect(&progress, -ScaleUi(3), -ScaleUi(3));
             int block_count = 18;
-            int gap = 2;
+            int gap = ScaleUi(2);
             int block_width = (progress.right - progress.left - gap * (block_count - 1)) / block_count;
             int active = (int)(InterlockedCompareExchange((LONG *)&g_splash_tick, 0, 0) % block_count);
             HBRUSH active_brush = CreateSolidBrush(RGB(0, 0, 160));
@@ -2169,7 +2388,7 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             DeleteObject(active_brush);
 
             SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
-            RECT copyright = {24, 225, client.right - 24, 245};
+            RECT copyright = {ScaleUi(24), ScaleUi(225), client.right - ScaleUi(24), ScaleUi(245)};
             DrawTextW(dc, APP_COPYRIGHT_W, -1, &copyright, DT_LEFT | DT_SINGLELINE);
             SelectObject(dc, old_font);
             EndPaint(hwnd, &paint);
@@ -2188,13 +2407,13 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 }
 
 static BOOL CreateSplashWindow(void) {
-    g_splash_title_font = CreateFontW(-27, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    g_splash_title_font = CreateFontW(-ScaleUi(27), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Tahoma");
-    g_splash_body_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_splash_body_font = CreateFontW(-ScaleUi(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGEUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
-    int width = 460, height = 258;
+    int width = ScaleUi(460), height = ScaleUi(258);
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
     g_splash = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -2242,7 +2461,8 @@ static void OpenThirdPartyNotices(HWND owner) {
     }
     MessageBoxW(owner,
         L"포함된 외부 구성 요소\r\n\r\n"
-        L"yt-dlp Windows 실행 파일 — GNU GPL v3 이상\r\n"
+        L"yt-dlp 및 yt-dlp-ejs — Unlicense\r\n"
+        L"Deno JavaScript runtime — MIT License\r\n"
         L"FFmpeg Essentials Build — GNU GPL v3\r\n\r\n"
         L"각 구성 요소의 원문 라이선스와 소스 주소는 배포 파일에 포함된 "
         L"THIRD_PARTY_NOTICES.txt에서 확인할 수 있습니다.",
@@ -2267,7 +2487,7 @@ static void DrawAboutBanner(const DRAWITEMSTRUCT *item) {
         ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HFONT old_font = (HFONT)SelectObject(dc, title_font);
     SetTextColor(dc, RGB(255, 255, 255));
-    DrawTextW(dc, L"S", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(dc, L"F", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
     RECT title = { bounds.left + 96, bounds.top + 17,
                    bounds.right - 18, bounds.top + 54 };
@@ -2349,12 +2569,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_FILE_BROWSE_FOLDER: BrowseFolder(); break;
                 case IDM_FILE_OPEN_FOLDER: OpenFolder(); break;
                 case IDC_DOWNLOAD_ALL: StartDownload(FALSE); break;
+                case IDC_CANCEL_DOWNLOAD: RequestCancellation(); break;
+                case IDC_APPLY_FILENAME: ApplyManualFilename(); break;
                 case IDM_JOB_DOWNLOAD_ALL: StartDownload(FALSE); break;
                 case IDM_JOB_RETRY_FAILED: StartDownload(TRUE); break;
                 case IDM_JOB_DELETE_SELECTED: DeleteSelected(); break;
                 case IDM_JOB_CLEAR: ClearJobs(); break;
                 case IDM_TOOLS_REFRESH_STATS: UpdateFolderStatsUI(); break;
                 case IDM_TOOLS_OPEN_HISTORY: OpenHistoryFile(); break;
+                case IDM_TOOLS_OPEN_LOG: OpenLogFile(); break;
                 case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(FALSE); break;
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
@@ -2407,6 +2630,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             wchar_t text[160];
             StringCchPrintfW(text, 160, L"상태: 링크 정보 조회 완료 (대기 %d, 실패 %d)", ready, failed);
             SetControlText(g_status, text);
+            CloseAfterWorkersIfRequested();
             return 0;
         }
 
@@ -2431,11 +2655,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             LeaveCriticalSection(&g_jobs_lock);
             wchar_t text[180];
-            StringCchPrintfW(text, 180, L"상태: 작업 완료 (완료 %d, 건너뜀 %d, 실패 %d)",
-                             done, skipped, failed);
+            BOOL cancelled = g_cancel_event && WaitForSingleObject(g_cancel_event, 0) == WAIT_OBJECT_0;
+            StringCchPrintfW(text, 180,
+                cancelled ? L"상태: 작업 취소됨 (완료 %d, 건너뜀 %d, 실패 %d)" :
+                            L"상태: 작업 완료 (완료 %d, 건너뜀 %d, 실패 %d)",
+                done, skipped, failed);
             SendMessageW(g_progress, PBM_SETPOS, wParam ? 100 : 0, 0);
             SetControlText(g_status, text);
+            SetDownloadUiBusy(FALSE);
             UpdateFolderStatsUI();
+            CloseAfterWorkersIfRequested();
             return 0;
         }
 
@@ -2484,10 +2713,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_APP_TOOLS_READY:
-            SetControlText(g_status, wParam ? L"준비 완료" : L"상태: yt-dlp 또는 ffmpeg를 찾을 수 없음");
+            SetControlText(g_status, wParam ? L"준비 완료" : L"상태: 내장 yt-dlp, FFmpeg 또는 Deno 준비 실패");
             SetStartupPhase(4);
             ShowMainAfterSplash(hwnd);
             if (ShouldCheckUpdatesAutomatically()) SetTimer(hwnd, IDT_AUTO_UPDATE, 1500, NULL);
+            CloseAfterWorkersIfRequested();
             return 0;
 
         case WM_TIMER:
@@ -2508,7 +2738,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
                 InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
                 InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
-                MessageBoxW(hwnd, L"현재 작업이 진행 중입니다. 작업이 끝난 뒤 종료해 주세요.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
+                if (MessageBoxW(hwnd,
+                    L"현재 작업을 취소하고 종료하시겠습니까?\r\n\r\n진행 중인 하위 프로세스도 함께 종료됩니다.",
+                    APP_TITLE, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    InterlockedExchange((LONG *)&g_close_after_cancel, 1);
+                    RequestCancellation();
+                }
                 return 0;
             }
             DestroyWindow(hwnd);
@@ -2520,6 +2755,59 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static BOOL RunHistorySelfTests(void) {
+    wchar_t folder[MAX_PATH], song[MAX_PATH], legacy_song[MAX_PATH], history_path[MAX_PATH];
+    if (!CreateBatchTempDirectory(folder, MAX_PATH)) return FALSE;
+    if (FAILED(StringCchPrintfW(song, MAX_PATH, L"%s\\song.mp3", folder)) ||
+        FAILED(StringCchPrintfW(legacy_song, MAX_PATH, L"%s\\legacy.mp3", folder)) ||
+        !History_GetPath(folder, history_path, MAX_PATH)) {
+        DeleteTempTree(folder);
+        return FALSE;
+    }
+
+    BOOL ok = FALSE;
+    HANDLE file = CreateFileW(song, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto cleanup;
+    CloseHandle(file);
+    History_Invalidate();
+    if (!History_Record(folder, L"test-id", L"song.mp3", 320) ||
+        !History_ShouldSkip(folder, L"test-id", L"song.mp3", 320) ||
+        History_ShouldSkip(folder, L"test-id", L"song.mp3", 128)) goto cleanup;
+    DeleteFileW(song);
+    if (History_ShouldSkip(folder, L"test-id", L"song.mp3", 320)) goto cleanup;
+
+    DeleteFileW(history_path);
+    History_Invalidate();
+    file = CreateFileW(history_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto cleanup;
+    const char legacy_record[] = "legacy-id\r\n";
+    DWORD written = 0;
+    BOOL wrote = WriteFile(file, legacy_record, (DWORD)(sizeof(legacy_record) - 1), &written, NULL);
+    CloseHandle(file);
+    if (!wrote || written != (DWORD)(sizeof(legacy_record) - 1)) goto cleanup;
+    file = CreateFileW(legacy_song, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto cleanup;
+    CloseHandle(file);
+    if (!History_ShouldSkip(folder, L"legacy-id", L"legacy.mp3", 320) ||
+        History_ShouldSkip(folder, L"legacy-id", L"legacy.mp3", 128)) goto cleanup;
+    wchar_t *migrated = ReadTextFile(history_path);
+    if (!migrated || !wcsstr(migrated, L"# Febius download history v2") ||
+        !wcsstr(migrated, L"legacy-id\t320\t")) {
+        free(migrated);
+        goto cleanup;
+    }
+    free(migrated);
+    ok = TRUE;
+
+cleanup:
+    History_Invalidate();
+    DeleteTempTree(folder);
+    return ok;
 }
 
 static BOOL RunCoreSelfTests(void) {
@@ -2573,32 +2861,64 @@ static BOOL RunCoreSelfTests(void) {
         EstimatedMp3Bytes(0, 320) != 0 ||
         !IsSupportedBitrate(128) || !IsSupportedBitrate(192) ||
         !IsSupportedBitrate(256) || !IsSupportedBitrate(320) ||
-        IsSupportedBitrate(96)) return FALSE;
+        IsSupportedBitrate(96) || !RunHistorySelfTests()) return FALSE;
     return TRUE;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance;
+    (void)lpCmdLine;
     g_instance = hInstance;
-    SetProcessDPIAware();
+    if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)) {
+        SetProcessDPIAware();
+    }
+    g_ui_dpi = GetDpiForSystem();
+    if (g_ui_dpi < 96 || g_ui_dpi > 480) g_ui_dpi = 96;
     HRESULT co_init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitializeCriticalSection(&g_jobs_lock);
     InitializeCriticalSection(&g_file_lock);
-    InitializeCriticalSection(&g_history_lock);
     InitializeCriticalSection(&g_tools_lock);
     int result = 1;
     GetAppDirectory(g_app_dir, MAX_PATH);
+    g_cancel_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_cancel_event || !History_Init() || !InitializeAppDataPaths()) goto cleanup;
+    Logger_Init(g_local_app_dir);
+    wchar_t startup_log[96];
+    if (SUCCEEDED(StringCchPrintfW(startup_log, 96, L"Febius %s을 시작합니다.", APP_VERSION_W))) {
+        Logger_Write(L"app", startup_log);
+    }
+    CleanupOrphanTempDirectories();
 
-    if (lpCmdLine && wcsstr(lpCmdLine, L"--self-test-core")) {
+    BOOL core_self_test = HasCommandLineSwitch(L"--self-test-core");
+    BOOL tool_self_test = HasCommandLineSwitch(L"--self-test-tools");
+    if (!core_self_test && !tool_self_test) {
+        g_instance_mutex = CreateMutexW(NULL, TRUE, L"Local\\FebiusYTMP3Downloader.SingleInstance");
+        DWORD mutex_error = GetLastError();
+        if (!g_instance_mutex || mutex_error == ERROR_ALREADY_EXISTS) {
+            MessageBoxW(NULL, L"Febius가 이미 실행 중입니다.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
+            if (g_instance_mutex) {
+                CloseHandle(g_instance_mutex);
+                g_instance_mutex = NULL;
+            }
+            result = 0;
+            goto cleanup;
+        }
+    }
+
+    if (core_self_test) {
         result = RunCoreSelfTests() ? 0 : 3;
         goto cleanup;
     }
 
-    if (lpCmdLine && wcsstr(lpCmdLine, L"--self-test-tools")) {
+    if (tool_self_test) {
         PrepareBundledTools();
         RefreshTools();
         wchar_t ffprobe[MAX_PATH];
-        BOOL ok = g_ytdlp[0] && g_ffmpeg[0] && FindTool(L"ffprobe.exe", ffprobe, MAX_PATH);
+        BOOL ok = FindTool(L"ffprobe.exe", ffprobe, MAX_PATH) &&
+                  ToolExecutableWorks(g_ytdlp, L"--version") &&
+                  ToolExecutableWorks(g_ffmpeg, L"-version") &&
+                  ToolExecutableWorks(ffprobe, L"-version") &&
+                  ToolExecutableWorks(g_deno, L"--version");
         result = ok ? 0 : 2;
         goto cleanup;
     }
@@ -2626,15 +2946,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"FebiusYTMP3ClassicWin32";
-    wc.hIconSm = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON),
+                                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     if (!RegisterClassExW(&wc)) goto cleanup;
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r = {0, 0, APP_CLIENT_W, APP_CLIENT_H};
+    RECT r = {0, 0, ScaleUi(APP_CLIENT_W), ScaleUi(APP_CLIENT_H)};
     AdjustWindowRect(&r, style, TRUE);
     int width = r.right - r.left;
     int height = r.bottom - r.top;
@@ -2663,21 +2984,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
             result = 1;
             break;
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        if (!g_main || !IsDialogMessageW(g_main, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
 cleanup:
     if (g_splash && IsWindow(g_splash)) DestroyWindow(g_splash);
     if (g_splash_title_font) DeleteObject(g_splash_title_font);
     if (g_splash_body_font) DeleteObject(g_splash_body_font);
-    EnterCriticalSection(&g_history_lock);
-    HistoryClearUnlocked();
-    LeaveCriticalSection(&g_history_lock);
-    DeleteCriticalSection(&g_history_lock);
+    History_Shutdown();
     DeleteCriticalSection(&g_file_lock);
     DeleteCriticalSection(&g_jobs_lock);
     DeleteCriticalSection(&g_tools_lock);
+    if (g_cancel_event) CloseHandle(g_cancel_event);
+    if (g_instance_mutex) {
+        ReleaseMutex(g_instance_mutex);
+        CloseHandle(g_instance_mutex);
+    }
+    Logger_Shutdown();
     if (SUCCEEDED(co_init)) CoUninitialize();
     return result;
 }

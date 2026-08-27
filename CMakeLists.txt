@@ -24,7 +24,10 @@ add_executable(FebiusYTMP3Downloader WIN32
     src/app.rc
     src/command_line.c
     src/filename.c
+    src/history.c
+    src/logger.c
     src/main.c
+    src/process_runner.c
 )
 
 target_include_directories(FebiusYTMP3Downloader PRIVATE
@@ -44,6 +47,8 @@ target_compile_definitions(FebiusYTMP3Downloader PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00
+    NTDDI_VERSION=0x0A000000
     _CRT_SECURE_NO_WARNINGS
 )
 

@@ -6,14 +6,13 @@ on:
     paths:
       - VERSION
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version without v prefix (e.g. 1.1.0)'
-        required: true
-        default: '1.1.0'
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -21,20 +20,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve version and notes
         shell: pwsh
-        env:
-          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            $version = $env:DISPATCH_VERSION
-          } else {
-            $version = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
-          }
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
-            throw 'Version must look like 1.2.3 or 1.2.3-preview.1.'
+          $version = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'VERSION must use the x.y.z format.'
           }
           $notes = ".github/release-notes/v$version.md"
           if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
@@ -73,20 +66,14 @@ jobs:
 
       - name: Build single-file EXE
         shell: pwsh
-        run: |
-          Compress-Archive -Path 'payload/*' -DestinationPath 'tools-payload.zip' -CompressionLevel Optimal -Force
-          Copy-Item 'build/Release/FebiusYTMP3Downloader.exe' 'FebiusYTMP3Downloader.exe'
-          $payload = [System.IO.File]::ReadAllBytes((Resolve-Path 'tools-payload.zip'))
-          $out = [System.IO.File]::Open('FebiusYTMP3Downloader.exe', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
-          try {
-            $out.Write($payload, 0, $payload.Length)
-            $size = [BitConverter]::GetBytes([Int64]$payload.Length)
-            $out.Write($size, 0, $size.Length)
-            $magic = [Text.Encoding]::ASCII.GetBytes('YTMP3PK1')
-            $out.Write($magic, 0, $magic.Length)
-          } finally {
-            $out.Dispose()
-          }
+        run: ./.github/scripts/build-single-file.ps1
+
+      - name: Sign when certificate is configured and generate checksum
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./.github/scripts/sign-and-hash.ps1
 
       - name: Verify bundled tools
         shell: pwsh
@@ -101,4 +88,5 @@ jobs:
         run: |
           $tag = "v$env:VERSION"
           $title = "Febius YT MP3 Downloader v$env:VERSION"
-          gh release create $tag FebiusYTMP3Downloader.exe --target $env:GITHUB_SHA --title $title --notes-file $env:RELEASE_NOTES_FILE
+          gh release create $tag FebiusYTMP3Downloader.exe FebiusYTMP3Downloader.exe.sha256 SIGNING_STATUS.txt `
+            --target $env:GITHUB_SHA --title $title --notes-file $env:RELEASE_NOTES_FILE
