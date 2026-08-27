@@ -61,6 +61,7 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:RC>:/nologo>
     )
     target_link_options(FebiusYTMP3Downloader PRIVATE
+        /MANIFEST:NO
         $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
     )
 else()
