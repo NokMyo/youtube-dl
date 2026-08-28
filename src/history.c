@@ -215,18 +215,19 @@ BOOL History_Record(const wchar_t *folder,
                         (!attributes.nFileSizeHigh && !attributes.nFileSizeLow);
         FILE *file = _wfopen(path, L"ab");
         if (file) {
-            if (new_file) fputs("# Febius Downrush download history v2\r\n", file);
+            BOOL header_ok = !new_file ||
+                fputs("# Febius Downrush download history v2\r\n", file) >= 0;
             char id_utf8[512], filename_utf8[1024];
             int id_bytes = WideCharToMultiByte(CP_UTF8, 0, video_id, -1,
                                                id_utf8, (int)sizeof(id_utf8), NULL, NULL);
             int name_bytes = WideCharToMultiByte(CP_UTF8, 0, actual_filename, -1,
                                                  filename_utf8, (int)sizeof(filename_utf8), NULL, NULL);
-            if (id_bytes > 0 && name_bytes > 0 &&
-                fprintf(file, "%s\t%d\t%s\r\n", id_utf8, bitrate, filename_utf8) > 0) {
-                fflush(file);
+            if (header_ok && id_bytes > 0 && name_bytes > 0 &&
+                fprintf(file, "%s\t%d\t%s\r\n", id_utf8, bitrate, filename_utf8) > 0 &&
+                fflush(file) == 0) {
                 success = TRUE;
             }
-            fclose(file);
+            if (fclose(file) != 0) success = FALSE;
         }
     }
     if (success) InsertUnlocked(video_id, bitrate, actual_filename);

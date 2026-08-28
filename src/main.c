@@ -20,6 +20,7 @@
 #include "logger.h"
 #include "process_runner.h"
 #include "resource.h"
+#include "updater.h"
 #include "version.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -38,8 +39,9 @@
 #define APP_CLIENT_H 640
 #define META_WORKER_COUNT 4
 #define DOWNLOAD_WORKER_COUNT 2
+#define BUNDLE_ID_BYTES 32
+#define BUNDLE_FOOTER_BYTES 48
 #define IDT_SPLASH_ANIMATE 1
-#define IDT_SHOW_MAIN 2
 #define IDT_AUTO_UPDATE 3
 
 #define IDC_URL_EDIT            1001
@@ -57,6 +59,17 @@
 #define IDC_APPLY_FILENAME      1052
 #define IDC_CANCEL_DOWNLOAD     1053
 
+#define UI_FOLDER_STATS_X       20
+#define UI_FOLDER_STATS_W       300
+#define UI_PROGRESS_X           330
+#define UI_PROGRESS_W           350
+#define UI_OVERALL_X            686
+#define UI_OVERALL_W            72
+#define UI_DOWNLOAD_X           765
+#define UI_DOWNLOAD_W           120
+#define UI_CANCEL_X             890
+#define UI_CANCEL_W             52
+
 #define WM_APP_JOB_UPDATED      (WM_APP + 1)
 #define WM_APP_REBUILD_LIST     (WM_APP + 2)
 #define WM_APP_META_DONE        (WM_APP + 3)
@@ -66,6 +79,8 @@
 #define WM_APP_TOOLS_READY      (WM_APP + 9)
 #define WM_APP_UPDATE_RESULT    (WM_APP + 10)
 #define WM_APP_SPLASH_STATUS    (WM_APP + 11)
+#define WM_APP_UPDATE_PROGRESS  (WM_APP + 12)
+#define WM_APP_UPDATE_READY     (WM_APP + 13)
 
 #define IDM_FILE_LOAD_TXT       2001
 #define IDM_FILE_BROWSE_FOLDER  2002
@@ -164,6 +179,13 @@ typedef struct UpdateResult {
     wchar_t latest[32];
 } UpdateResult;
 
+typedef struct UpdateInstallResult {
+    BOOL success;
+    wchar_t latest[32];
+    wchar_t downloaded_path[MAX_PATH];
+    wchar_t error[256];
+} UpdateInstallResult;
+
 typedef struct DownloadJobSnapshot {
     wchar_t url[2048];
     wchar_t video_id[128];
@@ -219,6 +241,7 @@ static volatile LONG g_meta_running = 0;
 static volatile LONG g_download_running = 0;
 static volatile LONG g_tools_loading = 0;
 static volatile LONG g_update_running = 0;
+static volatile LONG g_update_installing = 0;
 static volatile LONG g_startup_phase = 0;
 static volatile LONG g_splash_progress = 8;
 static volatile LONG g_stats_generation = 0;
@@ -242,7 +265,6 @@ static wchar_t g_saved_folder[MAX_PATH];
 static HANDLE g_cancel_event;
 static HANDLE g_instance_mutex;
 static int g_main_show_command = SW_SHOWNORMAL;
-static ULONGLONG g_splash_started = 0;
 static UINT g_ui_dpi = 96;
 static DWORD g_processor_count = 1;
 
@@ -257,14 +279,44 @@ static int ScaleUi(int value) {
     return MulDiv(value, (int)g_ui_dpi, 96);
 }
 
+static void GetPrimaryWorkArea(RECT *work_area) {
+    if (!work_area) return;
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, work_area, 0)) {
+        SetRect(work_area, 0, 0, GetSystemMetrics(SM_CXSCREEN),
+                GetSystemMetrics(SM_CYSCREEN));
+    }
+}
+
+static UINT FitUiDpiToWorkArea(UINT requested_dpi, DWORD window_style) {
+    RECT work_area;
+    GetPrimaryWorkArea(&work_area);
+    int available_width = work_area.right - work_area.left;
+    int available_height = work_area.bottom - work_area.top;
+    UINT candidate = requested_dpi < 96 ? 96 : requested_dpi;
+    while (candidate > 96) {
+        RECT window = {
+            0, 0,
+            MulDiv(APP_CLIENT_W, (int)candidate, 96),
+            MulDiv(APP_CLIENT_H, (int)candidate, 96)
+        };
+        if (AdjustWindowRect(&window, window_style, TRUE) &&
+            window.right - window.left <= available_width &&
+            window.bottom - window.top <= available_height) {
+            return candidate;
+        }
+        candidate--;
+    }
+    return 96;
+}
+
 static int MetadataWorkerLimitFor(DWORD processor_count) {
-    if (processor_count <= 2) return 1;
-    if (processor_count <= 4) return 2;
+    if (processor_count <= 4) return 1;
+    if (processor_count <= 8) return 2;
     return META_WORKER_COUNT;
 }
 
 static int DownloadWorkerLimitFor(DWORD processor_count) {
-    return processor_count <= 2 ? 1 : DOWNLOAD_WORKER_COUNT;
+    return processor_count <= 4 ? 1 : DOWNLOAD_WORKER_COUNT;
 }
 
 static int MetadataWorkerLimit(void) {
@@ -273,6 +325,10 @@ static int MetadataWorkerLimit(void) {
 
 static int DownloadWorkerLimit(void) {
     return DownloadWorkerLimitFor(g_processor_count);
+}
+
+static BOOL BaseUiRectsOverlap(int left_a, int width_a, int left_b, int width_b) {
+    return left_a < left_b + width_b && left_b < left_a + width_a;
 }
 
 static BOOL IsSupportedBitrate(DWORD value) {
@@ -623,38 +679,27 @@ static BOOL BundledToolFilesExist(void) {
     return FileExistsW2(p1) && FileExistsW2(p2) && FileExistsW2(p3) && FileExistsW2(p4);
 }
 
-static BOOL ReadBundleStamp(ULONGLONG expected) {
+static BOOL ReadBundleStamp(const unsigned char expected[BUNDLE_ID_BYTES]) {
     wchar_t path[MAX_PATH];
     StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return FALSE;
-    wchar_t text[64];
+    unsigned char stored[BUNDLE_ID_BYTES + 1];
     DWORD got = 0;
-    BOOL ok = ReadFile(h, text, sizeof(text) - sizeof(wchar_t), &got, NULL);
+    BOOL ok = ReadFile(h, stored, sizeof(stored), &got, NULL);
     CloseHandle(h);
-    if (!ok) return FALSE;
-    text[got / sizeof(wchar_t)] = 0;
-    return _wcstoui64(text, NULL, 10) == expected;
+    return ok && got == BUNDLE_ID_BYTES &&
+           memcmp(stored, expected, BUNDLE_ID_BYTES) == 0;
 }
 
-static void WriteBundleStamp(ULONGLONG value) {
-    wchar_t path[MAX_PATH], text[64];
+static void WriteBundleStamp(const unsigned char value[BUNDLE_ID_BYTES]) {
+    wchar_t path[MAX_PATH];
     StringCchPrintfW(path, MAX_PATH, L"%s\\payload.stamp", g_tools_dir);
-    StringCchPrintfW(text, 64, L"%llu", value);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD wrote = 0;
-    WriteFile(h, text, (DWORD)(wcslen(text) * sizeof(wchar_t)), &wrote, NULL);
+    WriteFile(h, value, BUNDLE_ID_BYTES, &wrote, NULL);
     CloseHandle(h);
-}
-
-static ULONGLONG BundleStampFromAttributes(const WIN32_FILE_ATTRIBUTE_DATA *attributes) {
-    ULARGE_INTEGER size, modified;
-    size.HighPart = attributes->nFileSizeHigh;
-    size.LowPart = attributes->nFileSizeLow;
-    modified.HighPart = attributes->ftLastWriteTime.dwHighDateTime;
-    modified.LowPart = attributes->ftLastWriteTime.dwLowDateTime;
-    return size.QuadPart ^ modified.QuadPart ^ 0x53594D5033504B31ULL;
 }
 
 static BOOL GetPayloadEndOffset(HANDLE executable, LONGLONG file_size, LONGLONG *payload_end) {
@@ -689,15 +734,16 @@ static BOOL GetPayloadEndOffset(HANDLE executable, LONGLONG file_size, LONGLONG 
 }
 
 static BOOL FindBundleFooterEnd(HANDLE executable, LONGLONG search_end, LONGLONG *footer_end) {
-    if (!footer_end || search_end < 16) return FALSE;
-    for (LONGLONG padding = 0; padding <= 7 && search_end - padding >= 16; ++padding) {
+    if (!footer_end || search_end < BUNDLE_FOOTER_BYTES) return FALSE;
+    for (LONGLONG padding = 0;
+         padding <= 7 && search_end - padding >= BUNDLE_FOOTER_BYTES; ++padding) {
         LARGE_INTEGER position;
         position.QuadPart = search_end - padding - 8;
         unsigned char magic[8];
         DWORD received = 0;
         if (SetFilePointerEx(executable, position, NULL, FILE_BEGIN) &&
             ReadFile(executable, magic, sizeof(magic), &received, NULL) &&
-            received == sizeof(magic) && !memcmp(magic, "YTMP3PK1", sizeof(magic))) {
+            received == sizeof(magic) && !memcmp(magic, "YTMP3PK2", sizeof(magic))) {
             *footer_end = search_end - padding;
             return TRUE;
         }
@@ -719,11 +765,7 @@ static BOOL PrepareBundledTools(void) {
     LARGE_INTEGER total;
     total.HighPart = (LONG)attributes.nFileSizeHigh;
     total.LowPart = attributes.nFileSizeLow;
-    if (total.QuadPart < 16) return FALSE;
-    ULONGLONG package_stamp = BundleStampFromAttributes(&attributes);
-
-    /* The normal launch path stops here without opening the ~95 MB package. */
-    if (BundledToolFilesExist() && ReadBundleStamp(package_stamp)) return TRUE;
+    if (total.QuadPart < BUNDLE_FOOTER_BYTES) return FALSE;
 
     HANDLE in = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
@@ -737,25 +779,34 @@ static BOOL PrepareBundledTools(void) {
     }
 
     LARGE_INTEGER footer_pos;
-    footer_pos.QuadPart = payload_end - 16;
+    footer_pos.QuadPart = payload_end - BUNDLE_FOOTER_BYTES;
     if (!SetFilePointerEx(in, footer_pos, NULL, FILE_BEGIN)) {
         CloseHandle(in);
         return FALSE;
     }
 
-    unsigned char footer[16];
+    unsigned char footer[BUNDLE_FOOTER_BYTES];
     DWORD got = 0;
     if (!ReadFile(in, footer, sizeof(footer), &got, NULL) || got != sizeof(footer) ||
-        memcmp(footer + 8, "YTMP3PK1", 8) != 0) {
+        memcmp(footer + 40, "YTMP3PK2", 8) != 0) {
         CloseHandle(in);
         return FALSE;
     }
 
     ULONGLONG payload_size = 0;
     memcpy(&payload_size, footer, sizeof(payload_size));
-    if (!payload_size || payload_size > (ULONGLONG)payload_end - 16ULL) {
+    unsigned char package_id[BUNDLE_ID_BYTES];
+    memcpy(package_id, footer + sizeof(payload_size), sizeof(package_id));
+    if (!payload_size || payload_size >
+        (ULONGLONG)payload_end - BUNDLE_FOOTER_BYTES) {
         CloseHandle(in);
         return FALSE;
+    }
+
+    /* Read only the footer on a cached launch; the large ZIP stays untouched. */
+    if (BundledToolFilesExist() && ReadBundleStamp(package_id)) {
+        CloseHandle(in);
+        return TRUE;
     }
 
     SetStartupPhase(2);
@@ -778,7 +829,7 @@ static BOOL PrepareBundledTools(void) {
     }
 
     LARGE_INTEGER start;
-    start.QuadPart = payload_end - 16 - (LONGLONG)payload_size;
+    start.QuadPart = payload_end - BUNDLE_FOOTER_BYTES - (LONGLONG)payload_size;
     if (!SetFilePointerEx(in, start, NULL, FILE_BEGIN)) {
         CloseHandle(out);
         CloseHandle(in);
@@ -850,7 +901,7 @@ static BOOL PrepareBundledTools(void) {
     DeleteFileW(zip_path);
 
     if (extracted && BundledToolFilesExist()) {
-        WriteBundleStamp(package_stamp);
+        WriteBundleStamp(package_id);
         return TRUE;
     }
     return FALSE;
@@ -1295,12 +1346,12 @@ static BOOL FetchMetadataForJob(int index) {
     if (!ran || process_result.exit_code != 0 || !lines.meta[0]) {
         const wchar_t *failure = process_result.cancelled ? L"사용자가 정보 조회를 취소했습니다." :
                                  process_result.timed_out ? L"영상 정보 조회 시간이 초과되었습니다." :
-                                 lines.last[0] ? lines.last : L"영상 정보를 가져오지 못했습니다.";
+                                 L"영상 정보를 가져오지 못했습니다. 링크와 인터넷 연결을 확인해 주세요.";
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
         StringCchCopyW(g_jobs[index].error, 768, failure);
         LeaveCriticalSection(&g_jobs_lock);
-        Logger_Write(L"metadata", failure);
+        Logger_Write(L"metadata", lines.last[0] ? lines.last : failure);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
     }
@@ -1362,6 +1413,7 @@ static void CompactDuplicates(void) {
 }
 
 static unsigned __stdcall MetadataWorker(void *param) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     MetaWork *work = (MetaWork *)param;
     for (;;) {
         int index = (int)InterlockedIncrement(&work->next) - 1;
@@ -1420,6 +1472,9 @@ static void StartMetadataBatch(int start, int end) {
     MetaBatch *batch = (MetaBatch *)malloc(sizeof(MetaBatch));
     if (!batch) {
         InterlockedExchange((LONG *)&g_meta_running, 0);
+        SetControlText(g_status, L"상태: 링크 정보 조회를 준비하지 못했습니다.");
+        MessageBoxW(g_main, L"링크 정보 조회에 필요한 메모리를 확보하지 못했습니다.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
     batch->start = start;
@@ -1429,6 +1484,9 @@ static void StartMetadataBatch(int start, int end) {
     else {
         free(batch);
         InterlockedExchange((LONG *)&g_meta_running, 0);
+        SetControlText(g_status, L"상태: 링크 정보 조회를 시작하지 못했습니다.");
+        MessageBoxW(g_main, L"링크 정보 조회 작업을 시작하지 못했습니다.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -1833,12 +1891,12 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
     if (!ran || process_result.exit_code != 0) {
         const wchar_t *failure = process_result.cancelled ? L"사용자가 다운로드를 취소했습니다." :
                                  process_result.timed_out ? L"다운로드 시간이 30분을 초과했습니다." :
-                                 lines.last[0] ? lines.last : L"다운로드 또는 MP3 변환에 실패했습니다.";
+                                 L"다운로드 또는 MP3 변환을 완료하지 못했습니다. 링크와 인터넷 연결을 확인해 주세요.";
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
         StringCchCopyW(g_jobs[index].error, 768, failure);
         LeaveCriticalSection(&g_jobs_lock);
-        Logger_Write(L"download", failure);
+        Logger_Write(L"download", lines.last[0] ? lines.last : failure);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
     }
@@ -1870,9 +1928,13 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
             L"저장 파일명을 만들지 못했습니다. 경로 길이와 같은 이름의 파일 수를 확인해 주세요.");
     }
     if (!moved) {
+        wchar_t log_message[96];
+        StringCchPrintfW(log_message, 96, L"완성 파일 이동 실패 (Windows 오류 %lu)", move_error);
+        Logger_Write(L"download", log_message);
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchPrintfW(g_jobs[index].error, 768, L"파일 이름 변경에 실패했습니다. 오류 코드: %lu", move_error);
+        StringCchCopyW(g_jobs[index].error, 768,
+            L"완성된 파일을 저장 폴더로 옮기지 못했습니다. 폴더 권한과 남은 공간을 확인해 주세요.");
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1892,6 +1954,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
 }
 
 static unsigned __stdcall DownloadWorker(void *param) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     DownloadWork *work = (DownloadWork *)param;
     for (;;) {
         int slot = (int)InterlockedIncrement(&work->next) - 1;
@@ -1989,6 +2052,9 @@ static void StartDownload(BOOL failed_only) {
     DownloadBatch *batch = (DownloadBatch *)malloc(sizeof(DownloadBatch));
     if (!batch) {
         InterlockedExchange((LONG *)&g_download_running, 0);
+        SetControlText(g_status, L"상태: 다운로드를 준비하지 못했습니다.");
+        MessageBoxW(g_main, L"다운로드에 필요한 메모리를 확보하지 못했습니다.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
     batch->failed_only = failed_only;
@@ -2014,6 +2080,9 @@ static void StartDownload(BOOL failed_only) {
         free(batch);
         InterlockedExchange((LONG *)&g_download_running, 0);
         SetDownloadUiBusy(FALSE);
+        SetControlText(g_status, L"상태: 다운로드를 시작하지 못했습니다.");
+        MessageBoxW(g_main, L"다운로드 작업을 시작하지 못했습니다.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -2276,16 +2345,19 @@ static void CreateUi(HWND hwnd) {
     AddCtl(0, L"BUTTON", L"변경", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
            816, 517, 126, 26, IDC_FOLDER_BROWSE, hwnd);
     g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡  |  총 용량: -", WS_CHILD | WS_VISIBLE,
-                            20, 555, 300, 22, IDC_FOLDER_STATS, hwnd);
+                            UI_FOLDER_STATS_X, 555, UI_FOLDER_STATS_W, 22,
+                            IDC_FOLDER_STATS, hwnd);
     g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
-                        330, 554, 380, 20, IDC_PROGRESS, hwnd);
+                        UI_PROGRESS_X, 554, UI_PROGRESS_W, 20, IDC_PROGRESS, hwnd);
     SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
-                       718, 554, 65, 22, IDC_OVERALL, hwnd);
+                       UI_OVERALL_X, 554, UI_OVERALL_W, 22, IDC_OVERALL, hwnd);
     g_download_button = AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                               765, 546, 120, 34, IDC_DOWNLOAD_ALL, hwnd);
+                               UI_DOWNLOAD_X, 546, UI_DOWNLOAD_W, 34,
+                               IDC_DOWNLOAD_ALL, hwnd);
     g_cancel_button = AddCtl(0, L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-                             890, 546, 52, 34, IDC_CANCEL_DOWNLOAD, hwnd);
+                             UI_CANCEL_X, 546, UI_CANCEL_W, 34,
+                             IDC_CANCEL_DOWNLOAD, hwnd);
 
     g_status = AddCtl(0, STATUSCLASSNAMEW, L"준비 완료", WS_CHILD | WS_VISIBLE,
                       0, 0, 0, 0, IDC_STATUS, hwnd);
@@ -2348,7 +2420,7 @@ static BOOL ParseSemanticVersion(const wchar_t *text, int parts[3]) {
             cursor++;
         }
     }
-    return !*cursor || *cursor == L'-' || *cursor == L'+';
+    return !*cursor;
 }
 
 static int CompareSemanticVersion(const wchar_t *left, const wchar_t *right) {
@@ -2445,6 +2517,13 @@ static unsigned __stdcall UpdateCheckThread(void *param) {
 }
 
 static void StartUpdateCheck(BOOL automatic) {
+    if (InterlockedCompareExchange((LONG *)&g_update_installing, 0, 0)) {
+        if (!automatic) {
+            MessageBoxW(g_main, L"업데이트를 내려받고 있습니다.", APP_TITLE,
+                        MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    }
     if (InterlockedCompareExchange((LONG *)&g_update_running, 1, 0) != 0) {
         if (!automatic) {
             MessageBoxW(g_main, L"업데이트를 확인하고 있습니다.", APP_TITLE,
@@ -2479,6 +2558,60 @@ static void StartUpdateCheck(BOOL automatic) {
         MessageBoxW(g_main, L"업데이트 확인 작업을 시작하지 못했습니다.", APP_TITLE,
                     MB_OK | MB_ICONERROR);
     }
+}
+
+static void UpdateDownloadProgress(int percent, void *context) {
+    HWND window = (HWND)context;
+    if (window) PostMessageW(window, WM_APP_UPDATE_PROGRESS, (WPARAM)percent, 0);
+}
+
+static unsigned __stdcall UpdateInstallThread(void *param) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    UpdateInstallResult *result = (UpdateInstallResult *)param;
+    result->success = Updater_DownloadRelease(
+        result->latest, result->downloaded_path, MAX_PATH,
+        UpdateDownloadProgress, g_main, result->error,
+        sizeof(result->error) / sizeof(result->error[0]));
+    if (!PostMessageW(g_main, WM_APP_UPDATE_READY, 0, (LPARAM)result)) {
+        if (result->success) DeleteFileW(result->downloaded_path);
+        InterlockedExchange((LONG *)&g_update_installing, 0);
+        free(result);
+    }
+    return 0;
+}
+
+static void StartUpdateInstall(const wchar_t *version) {
+    if (InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
+        InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
+        MessageBoxW(g_main,
+            L"현재 작업이 끝난 뒤 업데이트를 다시 시작해 주세요.",
+            L"업데이트", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (InterlockedCompareExchange((LONG *)&g_update_installing, 1, 0) != 0) return;
+    UpdateInstallResult *result = (UpdateInstallResult *)calloc(1, sizeof(*result));
+    if (!result) {
+        InterlockedExchange((LONG *)&g_update_installing, 0);
+        MessageBoxW(g_main, L"업데이트에 필요한 메모리를 확보하지 못했습니다.",
+                    L"업데이트", MB_OK | MB_ICONERROR);
+        return;
+    }
+    StringCchCopyW(result->latest, 32, version);
+    EnableWindow(g_main, FALSE);
+    SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+    SetControlText(g_status, L"상태: 업데이트 다운로드 중... 0%");
+    uintptr_t thread = _beginthreadex(NULL, 0, UpdateInstallThread, result, 0, NULL);
+    if (thread) {
+        CloseHandle((HANDLE)thread);
+        return;
+    }
+    EnableWindow(g_main, TRUE);
+    InterlockedExchange((LONG *)&g_update_installing, 0);
+    free(result);
+    SetControlText(g_status, L"준비 완료");
+    MessageBoxW(g_main, L"업데이트 작업을 시작하지 못했습니다.",
+                L"업데이트", MB_OK | MB_ICONERROR);
 }
 
 static void FillRectColor(HDC dc, const RECT *rect, COLORREF color) {
@@ -2789,28 +2922,21 @@ static BOOL CreateSplashWindow(void) {
         ScaleUi(256), ScaleUi(256), LR_DEFAULTCOLOR);
     InterlockedExchange((LONG *)&g_splash_progress, 8);
     int width = ScaleUi(640), height = ScaleUi(390);
-    int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
-    int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+    RECT work_area;
+    GetPrimaryWorkArea(&work_area);
+    int x = work_area.left + (work_area.right - work_area.left - width) / 2;
+    int y = work_area.top + (work_area.bottom - work_area.top - height) / 2;
     g_splash = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         L"FebiusDownrushSplashWin32", APP_TITLE, WS_POPUP | WS_BORDER,
         x, y, width, height, NULL, NULL, g_instance, NULL);
     if (!g_splash) return FALSE;
-    g_splash_started = GetTickCount64();
     ShowWindow(g_splash, SW_SHOWNORMAL);
     UpdateWindow(g_splash);
     return TRUE;
 }
 
 static void ShowMainAfterSplash(HWND hwnd) {
-    if (g_splash) {
-        ULONGLONG elapsed = GetTickCount64() - g_splash_started;
-        if (elapsed < 250) {
-            SetStartupPhase(4);
-            SetTimer(hwnd, IDT_SHOW_MAIN, (UINT)(250 - elapsed), NULL);
-            return;
-        }
-        DestroyWindow(g_splash);
-    }
+    if (g_splash) DestroyWindow(g_splash);
     ShowWindow(hwnd, g_main_show_command);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
@@ -3283,19 +3409,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             EnableMenuItem(menu, IDM_HELP_CHECK_UPDATES, MF_BYCOMMAND | MF_ENABLED);
             DrawMenuBar(hwnd);
             if (update && update->state == UPDATE_AVAILABLE) {
-                wchar_t message[256];
-                StringCchPrintfW(message, 256,
+                wchar_t message[384];
+                StringCchPrintfW(message, 384,
                     L"새 버전 %s을 사용할 수 있습니다.\r\n\r\n"
                     L"현재 버전: %s\r\n최신 버전: %s\r\n\r\n"
-                    L"다운로드 페이지를 여시겠습니까?",
+                    L"지금 업데이트하시겠습니까?\r\n"
+                    L"파일을 확인한 뒤 자동으로 교체하고 다시 실행합니다.",
                     update->latest, APP_VERSION_W, update->latest);
                 if (MessageBoxW(hwnd, message, L"업데이트 확인",
-                                MB_YESNO | MB_ICONINFORMATION) == IDYES) {
-                    wchar_t url[256];
-                    StringCchPrintfW(url, 256,
-                        L"https://github.com/NokMyo/youtube-dl/releases/tag/v%s", update->latest);
-                    OpenWebPage(hwnd, url);
-                }
+                                MB_YESNO | MB_ICONINFORMATION) == IDYES)
+                    StartUpdateInstall(update->latest);
             } else if (update && update->state == UPDATE_CURRENT && !automatic) {
                 wchar_t message[160];
                 StringCchPrintfW(message, 160,
@@ -3310,9 +3433,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             free(update);
-            if (!automatic && !g_meta_running && !g_download_running) {
+            if (!automatic && !g_meta_running && !g_download_running &&
+                !g_update_installing) {
                 SetControlText(g_status, L"준비 완료");
             }
+            return 0;
+        }
+
+        case WM_APP_UPDATE_PROGRESS: {
+            int percent = (int)wParam;
+            if (percent < 0) percent = 0;
+            if (percent > 100) percent = 100;
+            wchar_t text[96];
+            StringCchPrintfW(text, 96, L"상태: 업데이트 다운로드 중... %d%%", percent);
+            SendMessageW(g_progress, PBM_SETPOS, percent, 0);
+            SetControlText(g_status, text);
+            return 0;
+        }
+
+        case WM_APP_UPDATE_READY: {
+            UpdateInstallResult *install = (UpdateInstallResult *)lParam;
+            InterlockedExchange((LONG *)&g_update_installing, 0);
+            EnableWindow(hwnd, TRUE);
+            SetForegroundWindow(hwnd);
+            if (install && install->success) {
+                SetControlText(g_status, L"상태: 업데이트 적용 및 재시작 중...");
+                if (Updater_LaunchReplacement(install->downloaded_path,
+                                               install->error,
+                                               sizeof(install->error) /
+                                               sizeof(install->error[0]))) {
+                    Logger_Write(L"update", L"업데이트 파일 확인을 완료해 자동 교체를 시작합니다.");
+                    free(install);
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                DeleteFileW(install->downloaded_path);
+            }
+            SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+            SetControlText(g_status, L"상태: 업데이트에 실패했습니다.");
+            MessageBoxW(hwnd,
+                install && install->error[0] ? install->error :
+                    L"업데이트를 완료하지 못했습니다. 기존 프로그램은 그대로 유지됩니다.",
+                L"업데이트", MB_OK | MB_ICONERROR);
+            free(install);
             return 0;
         }
 
@@ -3325,10 +3488,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
 
         case WM_TIMER:
-            if (wParam == IDT_SHOW_MAIN) {
-                KillTimer(hwnd, IDT_SHOW_MAIN);
-                ShowMainAfterSplash(hwnd);
-            } else if (wParam == IDT_AUTO_UPDATE) {
+            if (wParam == IDT_AUTO_UPDATE) {
                 KillTimer(hwnd, IDT_AUTO_UPDATE);
                 StartUpdateCheck(TRUE);
             }
@@ -3339,6 +3499,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
 
         case WM_CLOSE:
+            if (InterlockedCompareExchange((LONG *)&g_update_installing, 0, 0)) {
+                MessageBoxW(hwnd, L"업데이트 파일을 확인하고 있습니다. 잠시만 기다려 주세요.",
+                            APP_TITLE, MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
             if (InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) ||
                 InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) ||
                 InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0)) {
@@ -3455,10 +3620,21 @@ static BOOL RunCoreSelfTests(void) {
         PathsEqualIgnoringTrailingSeparators(L"C:\\Music\\YouTubeMP3",
                                               L"C:\\Music\\Febius\\Downrush")) return FALSE;
 
-    if (MetadataWorkerLimitFor(1) != 1 || MetadataWorkerLimitFor(2) != 1 ||
-        MetadataWorkerLimitFor(4) != 2 || MetadataWorkerLimitFor(8) != META_WORKER_COUNT ||
+    if (MetadataWorkerLimitFor(1) != 1 || MetadataWorkerLimitFor(4) != 1 ||
+        MetadataWorkerLimitFor(8) != 2 || MetadataWorkerLimitFor(12) != META_WORKER_COUNT ||
         DownloadWorkerLimitFor(2) != 1 ||
-        DownloadWorkerLimitFor(4) != DOWNLOAD_WORKER_COUNT) return FALSE;
+        DownloadWorkerLimitFor(4) != 1 ||
+        DownloadWorkerLimitFor(8) != DOWNLOAD_WORKER_COUNT) return FALSE;
+
+    if (BaseUiRectsOverlap(UI_FOLDER_STATS_X, UI_FOLDER_STATS_W,
+                           UI_PROGRESS_X, UI_PROGRESS_W) ||
+        BaseUiRectsOverlap(UI_PROGRESS_X, UI_PROGRESS_W,
+                           UI_OVERALL_X, UI_OVERALL_W) ||
+        BaseUiRectsOverlap(UI_OVERALL_X, UI_OVERALL_W,
+                           UI_DOWNLOAD_X, UI_DOWNLOAD_W) ||
+        BaseUiRectsOverlap(UI_DOWNLOAD_X, UI_DOWNLOAD_W,
+                           UI_CANCEL_X, UI_CANCEL_W) ||
+        UI_CANCEL_X + UI_CANCEL_W > APP_CLIENT_W) return FALSE;
 
     wchar_t cleaned[256];
     Filename_BuildClean(L"가수 - 노래 (공식 뮤비)", L"", L"", TRUE, TRUE, cleaned, 256);
@@ -3470,11 +3646,20 @@ static BOOL RunCoreSelfTests(void) {
     if (!ParseSemanticVersion(L"v1.2.30", version_parts) ||
         version_parts[0] != 1 || version_parts[1] != 2 || version_parts[2] != 30 ||
         ParseSemanticVersion(L"1.2", version_parts) ||
+        ParseSemanticVersion(L"1.2.3/invalid", version_parts) ||
         CompareSemanticVersion(L"1.0.5", L"1.1.0") >= 0 ||
         CompareSemanticVersion(L"2.0.0", L"1.9.9") <= 0) return FALSE;
     wchar_t release_version[32];
     if (!ExtractReleaseTag("{\"tag_name\":\"v1.1.0\"}", release_version, 32) ||
         wcscmp(release_version, L"1.1.0")) return FALSE;
+    const char checksum_text[] =
+        "\xEF\xBB\xBF"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        " *FebiusDownrush.exe\r\n";
+    unsigned char checksum[UPDATER_SHA256_BYTES];
+    if (!Updater_ParseSha256Text(checksum_text, sizeof(checksum_text) - 1, checksum) ||
+        checksum[0] != 0xAA || checksum[UPDATER_SHA256_BYTES - 1] != 0xAA ||
+        Updater_ParseSha256Text("not-a-checksum", 14, checksum)) return FALSE;
     if (EstimatedMp3Bytes(180000, 320) != 7200000ULL ||
         EstimatedMp3Bytes(180000, 128) != 2880000ULL ||
         EstimatedMp3Bytes(0, 320) != 0 ||
@@ -3551,6 +3736,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         goto cleanup;
     }
 
+    Updater_CleanupPending();
     LoadSettings();
     MigrateLegacyDefaultOutputFolder();
 
@@ -3584,12 +3770,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     if (!RegisterClassExW(&wc)) goto cleanup;
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    g_ui_dpi = FitUiDpiToWorkArea(g_ui_dpi, style);
     RECT r = {0, 0, ScaleUi(APP_CLIENT_W), ScaleUi(APP_CLIENT_H)};
     AdjustWindowRect(&r, style, TRUE);
     int width = r.right - r.left;
     int height = r.bottom - r.top;
-    int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
-    int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+    RECT work_area;
+    GetPrimaryWorkArea(&work_area);
+    int x = work_area.left + (work_area.right - work_area.left - width) / 2;
+    int y = work_area.top + (work_area.bottom - work_area.top - height) / 2;
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, APP_TITLE, style,
                                 x, y, width, height, NULL, NULL, hInstance, NULL);

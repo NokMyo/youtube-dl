@@ -28,6 +28,7 @@ add_executable(FebiusDownrush WIN32
     src/logger.c
     src/main.c
     src/process_runner.c
+    src/updater.c
 )
 
 target_include_directories(FebiusDownrush PRIVATE
