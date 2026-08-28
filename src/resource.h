@@ -9,6 +9,5 @@
 #define IDC_ABOUT_SYSTEM        3008
 #define IDI_APP_ICON            3100
 #define IDI_FEBIUS_SYMBOL       3101
-#define IDI_DOWNRUSH_ARTWORK    3102
 
 #endif

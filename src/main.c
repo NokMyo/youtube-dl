@@ -205,7 +205,7 @@ static HFONT g_splash_body_font;
 static HFONT g_splash_brand_font;
 static HFONT g_splash_small_font;
 static HICON g_brand_symbol;
-static HICON g_downrush_artwork;
+static HICON g_downrush_icon;
 
 static Job g_jobs[MAX_JOBS];
 static int g_job_count = 0;
@@ -2574,8 +2574,8 @@ static void DrawBrandGeometry(HDC dc, RECT area) {
 }
 
 static void DrawDownrushProductMark(HDC dc, int x, int y, int size) {
-    if (g_downrush_artwork) {
-        DrawIconEx(dc, x, y, g_downrush_artwork,
+    if (g_downrush_icon) {
+        DrawIconEx(dc, x, y, g_downrush_icon,
                    size, size, 0, NULL, DI_NORMAL);
         return;
     }
@@ -2775,8 +2775,8 @@ static BOOL CreateSplashWindow(void) {
     g_brand_symbol = (HICON)LoadImageW(g_instance,
         MAKEINTRESOURCEW(IDI_FEBIUS_SYMBOL), IMAGE_ICON,
         ScaleUi(64), ScaleUi(64), LR_DEFAULTCOLOR);
-    g_downrush_artwork = (HICON)LoadImageW(g_instance,
-        MAKEINTRESOURCEW(IDI_DOWNRUSH_ARTWORK), IMAGE_ICON,
+    g_downrush_icon = (HICON)LoadImageW(g_instance,
+        MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
         ScaleUi(256), ScaleUi(256), LR_DEFAULTCOLOR);
     InterlockedExchange((LONG *)&g_splash_progress, 8);
     int width = ScaleUi(640), height = ScaleUi(390);
@@ -3360,6 +3360,11 @@ cleanup:
 }
 
 static BOOL RunCoreSelfTests(void) {
+    if (!FindResourceW(g_instance, MAKEINTRESOURCEW(IDI_APP_ICON), RT_GROUP_ICON) ||
+        !FindResourceW(g_instance, MAKEINTRESOURCEW(IDI_FEBIUS_SYMBOL), RT_GROUP_ICON)) {
+        return FALSE;
+    }
+
     const wchar_t *const arguments[] = {
         L"tool.exe", L"plain", L"with space", L"C:\\trailing\\", L"quote\"inside", L""
     };
@@ -3520,7 +3525,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"FebiusDownrushClassicWin32";
     wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON),
-                                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+                                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR | LR_SHARED);
     if (!RegisterClassExW(&wc)) goto cleanup;
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
@@ -3566,7 +3571,7 @@ cleanup:
     if (g_splash_brand_font) DeleteObject(g_splash_brand_font);
     if (g_splash_small_font) DeleteObject(g_splash_small_font);
     if (g_brand_symbol) DestroyIcon(g_brand_symbol);
-    if (g_downrush_artwork) DestroyIcon(g_downrush_artwork);
+    if (g_downrush_icon) DestroyIcon(g_downrush_icon);
     History_Shutdown();
     DeleteCriticalSection(&g_file_lock);
     DeleteCriticalSection(&g_jobs_lock);

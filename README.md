@@ -126,9 +126,9 @@ Lauv - I Like Me Better [Official Audio]
 
 배포 워크플로는 `yt-dlp`, Deno, FFmpeg의 버전과 SHA-256을 고정합니다. 릴리스에는 실행 파일과 함께 `FebiusDownrush.exe.sha256`, `SIGNING_STATUS.txt`가 게시됩니다. 저장소에 Windows 코드 서명 인증서 비밀 값이 설정된 경우에는 최종 단일 EXE를 Authenticode로 서명한 뒤 다시 검증합니다. 인증서가 없으면 서명되지 않았다는 상태 파일을 명시적으로 게시합니다.
 
-## 브랜드 이미지 자리
+## 브랜드 이미지
 
-실행 파일 아이콘은 `src/app.ico`, 로딩창·프로그램 정보의 Febius 공통 심볼과 Downrush 제품 그림은 각각 `src/febius-symbol.ico`, `src/downrush-artwork.ico` 자리를 사용합니다. 원본 SVG·PNG와 권장 ICO 크기는 `assets/branding/README.md`에 정리되어 있습니다. 이미지가 아직 없으면 화면에는 가벼운 벡터 대체 표시가 사용됩니다.
+`src/app.ico`는 실행 파일·작업 표시줄뿐 아니라 로딩창과 프로그램 정보의 Downrush 제품 표식에도 함께 사용합니다. Febius 공통 심볼은 `assets/branding/febius-symbol.svg` 원본과, Windows 표시용 다중 크기 자원인 `src/febius-symbol.ico`로 관리합니다. 두 자원이 손상되거나 빠지면 핵심 자체 검사에서 배포를 중단합니다.
 
 고정 버전의 최신 여부는 주간 `Dependency freshness` 워크플로가 확인하고, 실제 YouTube 추출 호환성은 별도의 주간 스모크 테스트가 점검합니다.
 
@@ -143,8 +143,7 @@ Lauv - I Like Me Better [Official Audio]
 │  ├─ history.c / history.h
 │  ├─ logger.c / logger.h
 │  ├─ process_runner.c / process_runner.h
-│  └─ main.c / app.manifest / app.ico
-├─ assets/app-icon.svg
+│  └─ main.c / app.manifest / app.ico / febius-symbol.ico
 ├─ assets/branding/README.md
 ├─ .github/scripts/
 ├─ .github/workflows/

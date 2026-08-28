@@ -6,11 +6,7 @@
 
 1 RT_MANIFEST "app.manifest"
 IDI_APP_ICON ICON "app.ico"
-
-/* 브랜드 이미지 자리입니다. 해당 ICO를 추가한 뒤 필요한 줄을 활성화합니다.
 IDI_FEBIUS_SYMBOL ICON "febius-symbol.ico"
-IDI_DOWNRUSH_ARTWORK ICON "downrush-artwork.ico"
-*/
 
 IDD_ABOUT DIALOGEX 0, 0, 560, 340
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
