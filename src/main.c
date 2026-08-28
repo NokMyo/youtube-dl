@@ -1237,7 +1237,7 @@ static BOOL FetchMetadataForJob(int index) {
     if (!g_ytdlp[0]) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchCopyW(g_jobs[index].error, 768, L"yt-dlp.exe를 찾을 수 없습니다.");
+        StringCchCopyW(g_jobs[index].error, 768, L"필요한 다운로드 도구를 찾을 수 없습니다.");
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1256,7 +1256,7 @@ static BOOL FetchMetadataForJob(int index) {
     if (FAILED(StringCchPrintfW(js_runtime, MAX_PATH + 16, L"deno:%s", g_deno))) {
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
-        StringCchCopyW(g_jobs[index].error, 768, L"JavaScript 런타임 경로가 너무 깁니다.");
+        StringCchCopyW(g_jobs[index].error, 768, L"필요한 다운로드 도구를 실행할 수 없습니다.");
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1439,7 +1439,7 @@ static void AddUrlsFromEdit(void) {
         return;
     }
     if (!ToolsAvailable()) {
-        MessageBoxW(g_main, L"내장 yt-dlp, FFmpeg 또는 Deno를 준비하지 못했습니다.",
+        MessageBoxW(g_main, L"필요한 다운로드 도구를 준비하지 못했습니다.",
                     APP_TITLE, MB_OK | MB_ICONERROR);
         return;
     }
@@ -1784,8 +1784,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
         EnterCriticalSection(&g_jobs_lock);
         g_jobs[index].status = JOB_FAILED;
         StringCchCopyW(g_jobs[index].error, 768,
-            !g_ytdlp[0] ? L"yt-dlp.exe를 찾을 수 없습니다." :
-            !g_ffmpeg[0] ? L"ffmpeg.exe를 찾을 수 없습니다." : L"deno.exe를 찾을 수 없습니다.");
+            L"필요한 다운로드 도구를 찾을 수 없습니다.");
         LeaveCriticalSection(&g_jobs_lock);
         PostMessageW(g_main, WM_APP_JOB_UPDATED, index, 0);
         return FALSE;
@@ -1808,7 +1807,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
     wchar_t audio_quality[16];
     StringCchPrintfW(audio_quality, 16, L"%dK", bitrate);
     if (FAILED(StringCchPrintfW(js_runtime, MAX_PATH + 16, L"deno:%s", g_deno))) {
-        return FailDownloadJob(index, L"JavaScript 런타임 경로가 너무 깁니다.");
+        return FailDownloadJob(index, L"필요한 다운로드 도구를 실행할 수 없습니다.");
     }
     const wchar_t *const arguments[] = {
         g_ytdlp, L"--ignore-config", L"--no-update", L"--encoding", L"utf-8", L"--no-playlist",
@@ -1980,7 +1979,7 @@ static void StartDownload(BOOL failed_only) {
     if (!ToolsAvailable()) {
         InterlockedExchange((LONG *)&g_download_running, 0);
         MessageBoxW(g_main,
-            L"내장 yt-dlp, FFmpeg 또는 Deno를 준비하지 못했습니다.\r\n\r\n"
+            L"필요한 다운로드 도구를 준비하지 못했습니다.\r\n\r\n"
             L"프로그램을 다시 실행하거나 최신 공식 릴리스를 받아 주세요.",
             APP_TITLE, MB_OK | MB_ICONERROR);
         return;
@@ -3318,7 +3317,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_APP_TOOLS_READY:
-            SetControlText(g_status, wParam ? L"준비 완료" : L"상태: 내장 yt-dlp, FFmpeg 또는 Deno 준비 실패");
+            SetControlText(g_status, wParam ? L"준비 완료" : L"상태: 필요한 다운로드 도구를 준비하지 못했습니다.");
             SetStartupPhase(4);
             ShowMainAfterSplash(hwnd);
             if (ShouldCheckUpdatesAutomatically()) SetTimer(hwnd, IDT_AUTO_UPDATE, 1500, NULL);
