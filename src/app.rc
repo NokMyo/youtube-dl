@@ -7,29 +7,21 @@
 1 RT_MANIFEST "app.manifest"
 IDI_APP_ICON ICON "app.ico"
 
-/* Febius 브랜드 심볼 자리입니다. src/febius-symbol.ico를 추가한 뒤 아래 줄을 활성화합니다.
+/* 브랜드 이미지 자리입니다. 해당 ICO를 추가한 뒤 필요한 줄을 활성화합니다.
 IDI_FEBIUS_SYMBOL ICON "febius-symbol.ico"
+IDI_DOWNRUSH_ARTWORK ICON "downrush-artwork.ico"
 */
 
-IDD_ABOUT DIALOGEX 0, 0, 390, 265
+IDD_ABOUT DIALOGEX 0, 0, 560, 340
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Febius Downrush 정보"
-FONT 9, "굴림"
+CAPTION "Downrush 정보"
+FONT 9, "Segoe UI"
 BEGIN
-    CONTROL         "", IDC_ABOUT_BANNER, "STATIC", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 390, 63
-    GROUPBOX        "제품 정보", -1, 12, 72, 366, 78
-    LTEXT           "제품군", -1, 23, 88, 88, 11
-    LTEXT           "Febius Utility Series", -1, 119, 88, 246, 11
-    LTEXT           "개발 및 저작권", -1, 23, 104, 88, 11
-    LTEXT           "NokMyo  |  Copyright © 2026 NokMyo. All rights reserved.", -1, 119, 104, 246, 11
-    LTEXT           "라이선스", -1, 23, 120, 88, 11
-    LTEXT           "개인용 비상업적 사용 허용 · 외부 구성 요소는 각 오픈소스 라이선스 적용", -1, 119, 120, 246, 20
-    GROUPBOX        "포함된 구성 요소", -1, 12, 157, 366, 53
-    LTEXT           "yt-dlp/yt-dlp-ejs — Unlicense · Deno — MIT", -1, 23, 174, 342, 11
-    LTEXT           "FFmpeg Essentials Build — GNU GPL v3", -1, 23, 190, 342, 11
-    PUSHBUTTON      "제3자 고지 보기", IDC_ABOUT_LICENSE, 105, 225, 92, 25
-    PUSHBUTTON      "릴리스 정보", IDC_ABOUT_RELEASES, 204, 225, 78, 25
-    DEFPUSHBUTTON   "확인", IDOK, 289, 225, 78, 25
+    CONTROL         "", IDC_ABOUT_BANNER, "STATIC", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 560, 340
+    CONTROL         "업데이트 확인", IDC_ABOUT_UPDATE, "BUTTON", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 366, 145, 170, 34
+    CONTROL         "릴리스 페이지", IDC_ABOUT_RELEASES, "BUTTON", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 366, 187, 170, 34
+    CONTROL         "라이선스", IDC_ABOUT_LICENSE, "BUTTON", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 366, 229, 170, 34
+    CONTROL         "시스템 정보", IDC_ABOUT_SYSTEM, "BUTTON", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 366, 271, 170, 34
 END
 
 VS_VERSION_INFO VERSIONINFO

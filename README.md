@@ -128,7 +128,7 @@ Lauv - I Like Me Better [Official Audio]
 
 ## 브랜드 이미지 자리
 
-Downrush 제품 아이콘은 `src/app.ico`, 프로그램 정보의 Febius 공통 심볼은 `src/febius-symbol.ico` 자리를 사용합니다. 원본 SVG·PNG와 권장 ICO 크기는 `assets/branding/README.md`에 정리되어 있습니다. 심볼이 아직 없으면 정보 화면은 가벼운 기본 `F` 표식을 사용합니다.
+실행 파일 아이콘은 `src/app.ico`, 로딩창·프로그램 정보의 Febius 공통 심볼과 Downrush 제품 그림은 각각 `src/febius-symbol.ico`, `src/downrush-artwork.ico` 자리를 사용합니다. 원본 SVG·PNG와 권장 ICO 크기는 `assets/branding/README.md`에 정리되어 있습니다. 이미지가 아직 없으면 화면에는 가벼운 벡터 대체 표시가 사용됩니다.
 
 고정 버전의 최신 여부는 주간 `Dependency freshness` 워크플로가 확인하고, 실제 YouTube 추출 호환성은 별도의 주간 스모크 테스트가 점검합니다.
 
