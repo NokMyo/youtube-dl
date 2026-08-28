@@ -1,6 +1,6 @@
 # Febius Downrush
 
-**Febius Utility Series · FAST · DIRECT · EFFICIENT**
+**Febius Utility Series**
 
 휴대폰에서 모아 둔 YouTube 링크를 Windows PC에서 한꺼번에 MP3로 정리해 내려받는 C + Win32 유틸리티입니다.
 

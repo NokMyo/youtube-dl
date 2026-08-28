@@ -31,7 +31,6 @@
 
 #define APP_TITLE L"Febius Downrush"
 #define APP_SERIES L"Febius Utility Series"
-#define APP_TAGLINE L"FAST · DIRECT · EFFICIENT"
 #define MAX_JOBS 512
 #define META_SEP L"<<<YTMP3>>>"
 #define CLEAN_NAME_CCH 256
@@ -203,7 +202,11 @@ static HFONT g_font;
 static HFONT g_splash_title_font;
 static HFONT g_splash_body_font;
 static HFONT g_splash_brand_font;
-static HFONT g_splash_small_font;
+static HFONT g_about_brand_font;
+static HFONT g_about_title_font;
+static HFONT g_about_section_font;
+static HFONT g_about_body_font;
+static HFONT g_about_series_font;
 static HICON g_brand_symbol;
 static HICON g_downrush_icon;
 
@@ -2696,8 +2699,6 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 ? g_splash_title_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             HFONT body_font = g_splash_body_font
                 ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HFONT small_font = g_splash_small_font
-                ? g_splash_small_font : body_font;
             HFONT old_font = (HFONT)SelectObject(dc, body_font);
             SetTextColor(dc, RGB(83, 88, 101));
             RECT series = {ScaleUi(40), ScaleUi(112), ScaleUi(390), ScaleUi(136)};
@@ -2734,13 +2735,6 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
             DrawDownrushProductMark(dc, client.right - ScaleUi(190),
                                     ScaleUi(140), ScaleUi(112));
-
-            SelectObject(dc, small_font);
-            SetTextColor(dc, RGB(112, 117, 128));
-            RECT tagline = {ScaleUi(40), client.bottom - ScaleUi(38),
-                            client.right - ScaleUi(32), client.bottom - ScaleUi(17)};
-            DrawTextW(dc, APP_TAGLINE, -1, &tagline,
-                      DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
             SelectObject(dc, old_font);
             EndPaint(hwnd, &paint);
             return 0;
@@ -2768,7 +2762,23 @@ static BOOL CreateSplashWindow(void) {
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    g_splash_small_font = CreateFontW(-ScaleUi(12), 0, 0, 0, FW_NORMAL,
+    g_about_brand_font = CreateFontW(-ScaleUi(29), 0, 0, 0, FW_SEMIBOLD,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_about_title_font = CreateFontW(-ScaleUi(50), 0, 0, 0, FW_SEMIBOLD,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_about_section_font = CreateFontW(-ScaleUi(15), 0, 0, 0, FW_SEMIBOLD,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_about_body_font = CreateFontW(-ScaleUi(14), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_about_series_font = CreateFontW(-ScaleUi(13), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -2818,21 +2828,93 @@ static void CenterDialog(HWND dialog) {
     SetWindowPos(dialog, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void OpenThirdPartyNotices(HWND owner) {
+static void OpenApplicationLicense(HWND owner) {
     wchar_t path[MAX_PATH];
     if (g_tools_dir[0] && SUCCEEDED(StringCchPrintfW(path, MAX_PATH,
-            L"%s\\THIRD_PARTY_NOTICES.txt", g_tools_dir)) && FileExistsW2(path)) {
+            L"%s\\APPLICATION_LICENSE.txt", g_tools_dir)) && FileExistsW2(path)) {
         HINSTANCE opened = ShellExecuteW(owner, L"open", path, NULL, NULL, SW_SHOWNORMAL);
         if ((INT_PTR)opened > 32) return;
     }
     MessageBoxW(owner,
-        L"포함된 외부 구성 요소\r\n\r\n"
-        L"yt-dlp 및 yt-dlp-ejs — Unlicense\r\n"
-        L"Deno JavaScript runtime — MIT License\r\n"
-        L"FFmpeg Essentials Build — GNU GPL v3\r\n\r\n"
-        L"각 구성 요소의 원문 라이선스와 소스 주소는 배포 파일에 포함된 "
-        L"THIRD_PARTY_NOTICES.txt에서 확인할 수 있습니다.",
-        L"제3자 소프트웨어 고지", MB_OK | MB_ICONINFORMATION);
+        L"Febius Downrush Standard User License\r\n\r\n"
+        L"Copyright © 2026 NokMyo. All rights reserved.\r\n\r\n"
+        L"The unmodified official binary may be used for personal, "
+        L"non-commercial use. The application is provided as is, without "
+        L"warranty of any kind.\r\n\r\n"
+        L"Bundled third-party programs remain subject to their own licenses "
+        L"listed in THIRD_PARTY_NOTICES.txt.",
+        L"Febius Downrush License", MB_OK | MB_ICONINFORMATION);
+}
+
+static void DrawAboutGeometry(HDC dc, RECT area) {
+    int width = area.right - area.left;
+    int height = area.bottom - area.top;
+    if (!dc || width < 100 || height < 100) return;
+
+    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    COLORREF old_brush_color = SetDCBrushColor(dc, RGB(243, 243, 245));
+    Ellipse(dc, area.left - width * 16 / 100, area.top + height * 8 / 100,
+            area.left + width * 30 / 100, area.top + height * 78 / 100);
+
+    RECT teal = {
+        area.left + width * 20 / 100, area.top + height * 59 / 100,
+        area.left + width * 38 / 100, area.bottom
+    };
+    RECT blue = {
+        area.left + width * 31 / 100, area.top + height * 25 / 100,
+        area.left + width * 49 / 100, area.top + height * 59 / 100
+    };
+    RECT pale = {
+        area.left + width * 38 / 100, area.top + height * 31 / 100,
+        area.left + width * 63 / 100, area.bottom
+    };
+    RECT purple = {
+        area.left + width * 47 / 100, area.top + height * 82 / 100,
+        area.left + width * 58 / 100, area.bottom
+    };
+    RECT black = {
+        area.left + width * 56 / 100, area.top + height * 72 / 100,
+        area.left + width * 78 / 100, area.bottom
+    };
+    FillRectColor(dc, &teal, RGB(57, 168, 162));
+    FillRectColor(dc, &blue, RGB(30, 78, 191));
+    FillRectColor(dc, &pale, RGB(232, 233, 236));
+    FillRectColor(dc, &purple, RGB(70, 55, 150));
+    FillRectColor(dc, &black, RGB(27, 30, 36));
+
+    SelectObject(dc, GetStockObject(DC_PEN));
+    COLORREF old_pen_color = SetDCPenColor(dc, RGB(43, 100, 224));
+    Arc(dc, area.left - width * 16 / 100, area.top + height * 38 / 100,
+        area.left + width * 61 / 100, area.top + height * 125 / 100,
+        area.left + width * 55 / 100, area.top + height * 69 / 100,
+        area.left, area.top + height * 91 / 100);
+    SetDCPenColor(dc, RGB(151, 155, 165));
+    Arc(dc, area.left + width * 60 / 100, area.top + height * 3 / 100,
+        area.left + width * 111 / 100, area.top + height * 98 / 100,
+        area.left + width * 106 / 100, area.top + height * 37 / 100,
+        area.left + width * 62 / 100, area.top + height * 92 / 100);
+
+    SelectObject(dc, GetStockObject(DC_BRUSH));
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    SetDCBrushColor(dc, RGB(188, 192, 201));
+    int dot_size = ScaleUi(2);
+    if (dot_size < 2) dot_size = 2;
+    int dot_start_x = area.left + width * 49 / 100;
+    int dot_start_y = area.top + height * 6 / 100;
+    int dot_gap = ScaleUi(9);
+    for (int row = 0; row < 6; ++row) {
+        for (int column = 0; column < 6; ++column) {
+            int x = dot_start_x + column * dot_gap;
+            int y = dot_start_y + row * dot_gap;
+            Ellipse(dc, x, y, x + dot_size, y + dot_size);
+        }
+    }
+
+    SetDCBrushColor(dc, old_brush_color);
+    SetDCPenColor(dc, old_pen_color);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
 }
 
 static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
@@ -2842,104 +2924,142 @@ static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
     int width = bounds.right - bounds.left;
     int height = bounds.bottom - bounds.top;
     int split = bounds.left + width * 61 / 100;
+    int footer_top = bounds.top + height * 88 / 100;
     FillRectColor(dc, &bounds, RGB(253, 253, 254));
-    RECT right_panel = { split, bounds.top, bounds.right, bounds.bottom };
-    FillRectColor(dc, &right_panel, RGB(249, 250, 252));
 
     HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
-    COLORREF previous_pen = SetDCPenColor(dc, RGB(218, 221, 228));
-    MoveToEx(dc, split, bounds.top, NULL);
-    LineTo(dc, split, bounds.bottom);
+    COLORREF previous_pen = SetDCPenColor(dc, RGB(221, 223, 228));
+    MoveToEx(dc, split, bounds.top + height * 7 / 100, NULL);
+    LineTo(dc, split, footer_top - height * 7 / 100);
+    MoveToEx(dc, bounds.left, footer_top, NULL);
+    LineTo(dc, bounds.right, footer_top);
     SetDCPenColor(dc, previous_pen);
     SelectObject(dc, old_pen);
 
-    RECT geometry = {
-        bounds.left + width * 27 / 100, bounds.top + height * 36 / 100,
-        split - ScaleUi(12), bounds.bottom - ScaleUi(20)
-    };
-    DrawBrandGeometry(dc, geometry);
-    DrawFebiusLockup(dc, bounds.left + ScaleUi(38),
-                     bounds.top + ScaleUi(28), ScaleUi(31));
+    RECT geometry = { bounds.left, bounds.top + height * 39 / 100, split, footer_top };
+    DrawAboutGeometry(dc, geometry);
     SetBkMode(dc, TRANSPARENT);
 
-    HFONT title_font = g_splash_title_font
-        ? g_splash_title_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HFONT body_font = g_splash_body_font
-        ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HFONT small_font = g_splash_small_font
-        ? g_splash_small_font : body_font;
-    HFONT old_font = (HFONT)SelectObject(dc, body_font);
+    HFONT brand_font = g_about_brand_font
+        ? g_about_brand_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT title_font = g_about_title_font
+        ? g_about_title_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT section_font = g_about_section_font
+        ? g_about_section_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT body_font = g_about_body_font
+        ? g_about_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT series_font = g_about_series_font
+        ? g_about_series_font : body_font;
+    HFONT old_font = (HFONT)SelectObject(dc, brand_font);
 
-    SetTextColor(dc, RGB(83, 88, 101));
-    RECT series = {
-        bounds.left + ScaleUi(40), bounds.top + height * 23 / 100,
-        split - ScaleUi(25), bounds.top + height * 29 / 100
+    int brand_x = bounds.left + width * 4 / 100;
+    int brand_y = bounds.top + height * 5 / 100;
+    int brand_symbol_size = height * 8 / 100;
+    DrawFebiusSymbolMark(dc, brand_x, brand_y, brand_symbol_size);
+    SetTextColor(dc, RGB(24, 26, 31));
+    RECT brand_word = {
+        brand_x + brand_symbol_size + ScaleUi(10), brand_y - ScaleUi(2),
+        split - ScaleUi(20), brand_y + brand_symbol_size + ScaleUi(3)
     };
+    DrawTextW(dc, L"Febius", -1, &brand_word,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+    SelectObject(dc, series_font);
+    SetTextColor(dc, RGB(44, 47, 55));
+    RECT series = {
+        brand_x, bounds.top + height * 19 / 100,
+        split - ScaleUi(20), bounds.top + height * 25 / 100
+    };
+    int previous_spacing = SetTextCharacterExtra(dc, ScaleUi(2));
     DrawTextW(dc, APP_SERIES, -1, &series,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SetTextCharacterExtra(dc, previous_spacing);
 
     SelectObject(dc, title_font);
     SetTextColor(dc, RGB(8, 10, 15));
     RECT product = {
-        bounds.left + ScaleUi(38), bounds.top + height * 29 / 100,
-        split - ScaleUi(20), bounds.top + height * 44 / 100
+        brand_x, bounds.top + height * 25 / 100,
+        split - ScaleUi(12), bounds.top + height * 39 / 100
     };
     DrawTextW(dc, L"Downrush", -1, &product,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SIZE product_extent;
+    ZeroMemory(&product_extent, sizeof(product_extent));
+    GetTextExtentPoint32W(dc, L"Downrush", 8, &product_extent);
+    int mark_size = height * 9 / 100;
+    int mark_y = product.top + ((product.bottom - product.top) - mark_size) / 2;
+    DrawDownrushProductMark(dc,
+        product.left + product_extent.cx + ScaleUi(12), mark_y, mark_size);
 
-    int mark_size = ScaleUi(138);
-    DrawDownrushProductMark(dc, bounds.left + ScaleUi(48),
-                            bounds.top + height * 51 / 100, mark_size);
-
-    SelectObject(dc, small_font);
-    SetTextColor(dc, RGB(102, 107, 119));
-    RECT tagline = {
-        bounds.left + ScaleUi(40), bounds.bottom - ScaleUi(42),
-        split - ScaleUi(22), bounds.bottom - ScaleUi(18)
+    int right_left = split + width * 5 / 100;
+    int right_right = bounds.right - width * 6 / 100;
+    SelectObject(dc, section_font);
+    SetTextColor(dc, RGB(32, 35, 42));
+    RECT version_label = {
+        right_left, bounds.top + height * 10 / 100,
+        right_right, bounds.top + height * 17 / 100
     };
-    DrawTextW(dc, APP_TAGLINE, -1, &tagline,
+    DrawTextW(dc, L"Version", -1, &version_label,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-
     SelectObject(dc, body_font);
-    int label_left = split + ScaleUi(32);
-    int value_right = bounds.right - ScaleUi(30);
-    int row_top = bounds.top + ScaleUi(42);
-    const wchar_t *labels[] = { L"버전", L"빌드", L"엔진" };
-    const wchar_t *values[] = { APP_VERSION_W, L"Release x64", L"yt-dlp · Deno · FFmpeg" };
-    for (int i = 0; i < 3; ++i) {
-        int top = row_top + ScaleUi(47) * i;
-        RECT label = { label_left, top, value_right, top + ScaleUi(25) };
-        SetTextColor(dc, RGB(39, 43, 52));
-        DrawTextW(dc, labels[i], -1, &label,
-                  DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-        RECT value = { label_left + ScaleUi(72), top,
-                       value_right, top + ScaleUi(25) };
-        DrawTextW(dc, values[i], -1, &value,
-                  DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-        if (i < 2) {
-            HGDIOBJ line_old_pen = SelectObject(dc, GetStockObject(DC_PEN));
-            COLORREF line_previous = SetDCPenColor(dc, RGB(222, 225, 231));
-            int line_y = top + ScaleUi(35);
-            MoveToEx(dc, label_left, line_y, NULL);
-            LineTo(dc, value_right, line_y);
-            SetDCPenColor(dc, line_previous);
-            SelectObject(dc, line_old_pen);
-        }
-    }
-
-    SelectObject(dc, small_font);
-    SetTextColor(dc, RGB(86, 91, 102));
-    RECT copyright = {
-        label_left, bounds.bottom - ScaleUi(48),
-        value_right, bounds.bottom - ScaleUi(28)
-    };
-    DrawTextW(dc, L"© 2026 NokMyo", -1, &copyright,
+    RECT version_value = version_label;
+    version_value.left += width * 9 / 100;
+    DrawTextW(dc, APP_VERSION_W, -1, &version_value,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    RECT family = {
-        label_left, bounds.bottom - ScaleUi(29),
-        value_right, bounds.bottom - ScaleUi(10)
+
+    HGDIOBJ line_old_pen = SelectObject(dc, GetStockObject(DC_PEN));
+    COLORREF line_previous = SetDCPenColor(dc, RGB(220, 222, 227));
+    int first_line_y = bounds.top + height * 20 / 100;
+    MoveToEx(dc, right_left, first_line_y, NULL);
+    LineTo(dc, right_right, first_line_y);
+
+    SelectObject(dc, section_font);
+    RECT license_label = {
+        right_left, bounds.top + height * 25 / 100,
+        right_right, bounds.top + height * 32 / 100
     };
-    DrawTextW(dc, APP_SERIES, -1, &family,
+    DrawTextW(dc, L"License", -1, &license_label,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(dc, body_font);
+    RECT license_value = {
+        right_left, bounds.top + height * 32 / 100,
+        right_right, bounds.top + height * 39 / 100
+    };
+    DrawTextW(dc, L"Standard User License", -1, &license_value,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    int second_line_y = bounds.top + height * 43 / 100;
+    MoveToEx(dc, right_left, second_line_y, NULL);
+    LineTo(dc, right_right, second_line_y);
+    SetDCPenColor(dc, line_previous);
+    SelectObject(dc, line_old_pen);
+
+    SelectObject(dc, section_font);
+    RECT copyright_label = {
+        right_left, bounds.top + height * 48 / 100,
+        right_right, bounds.top + height * 55 / 100
+    };
+    DrawTextW(dc, L"Copyright", -1, &copyright_label,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(dc, body_font);
+    RECT copyright_owner = {
+        right_left, bounds.top + height * 56 / 100,
+        right_right, bounds.top + height * 63 / 100
+    };
+    DrawTextW(dc, L"© 2026 Febius Software", -1, &copyright_owner,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    RECT copyright_rights = {
+        right_left, bounds.top + height * 63 / 100,
+        right_right, bounds.top + height * 70 / 100
+    };
+    DrawTextW(dc, L"All rights reserved.", -1, &copyright_rights,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+    SetTextColor(dc, RGB(84, 88, 98));
+    RECT support = {
+        bounds.left + width * 4 / 100, footer_top,
+        split, bounds.bottom
+    };
+    DrawTextW(dc, L"support@febius.com", -1, &support,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     SelectObject(dc, old_font);
 }
@@ -2951,130 +3071,66 @@ static void DrawAboutActionButton(const DRAWITEMSTRUCT *item) {
     BOOL disabled = (item->itemState & ODS_DISABLED) != 0;
     BOOL pressed = (item->itemState & ODS_SELECTED) != 0;
     BOOL focused = (item->itemState & ODS_FOCUS) != 0;
-    FillRectColor(dc, &bounds, pressed ? RGB(238, 243, 252) : RGB(253, 253, 254));
+    BOOL primary = item->CtlID == IDOK;
+    COLORREF background = primary
+        ? (pressed ? RGB(19, 72, 179) : RGB(35, 91, 207))
+        : (pressed ? RGB(241, 244, 249) : RGB(253, 253, 254));
+    FillRectColor(dc, &bounds, background);
 
     HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
     HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
     COLORREF previous_pen = SetDCPenColor(dc,
-        focused ? RGB(24, 94, 232) : RGB(185, 189, 198));
+        primary ? RGB(28, 77, 179) :
+        focused ? RGB(24, 94, 232) : RGB(181, 185, 194));
     Rectangle(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
     SetDCPenColor(dc, previous_pen);
     SelectObject(dc, old_pen);
     SelectObject(dc, old_brush);
 
-    const wchar_t *glyph = L"";
-    switch (item->CtlID) {
-        case IDC_ABOUT_UPDATE: glyph = L"↻"; break;
-        case IDC_ABOUT_RELEASES: glyph = L"↗"; break;
-        case IDC_ABOUT_LICENSE: glyph = L"▤"; break;
-        case IDC_ABOUT_SYSTEM: glyph = L"▣"; break;
-    }
     wchar_t label_text[64];
     GetWindowTextW(item->hwndItem, label_text, 64);
     int offset = pressed ? ScaleUi(1) : 0;
-    HFONT font = g_splash_body_font
-        ? g_splash_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT font = (primary && g_about_section_font)
+        ? g_about_section_font
+        : (g_about_body_font
+            ? g_about_body_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
     HFONT old_font = (HFONT)SelectObject(dc, font);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, disabled ? RGB(155, 158, 166) : RGB(30, 34, 42));
-    RECT icon_rect = {
-        bounds.left + ScaleUi(18) + offset, bounds.top + offset,
-        bounds.left + ScaleUi(52) + offset, bounds.bottom + offset
-    };
-    DrawTextW(dc, glyph, -1, &icon_rect,
-              DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SetTextColor(dc, disabled ? RGB(155, 158, 166) :
+                 primary ? RGB(255, 255, 255) : RGB(35, 38, 45));
     RECT text_rect = {
-        bounds.left + ScaleUi(58) + offset, bounds.top + offset,
-        bounds.right - ScaleUi(16) + offset, bounds.bottom + offset
+        bounds.left + offset, bounds.top + offset,
+        bounds.right + offset, bounds.bottom + offset
     };
     DrawTextW(dc, label_text, -1, &text_rect,
-              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+              DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     SelectObject(dc, old_font);
     if (focused) {
         RECT focus = bounds;
         InflateRect(&focus, -ScaleUi(4), -ScaleUi(4));
-        DrawFocusRect(dc, &focus);
+        if (!primary) DrawFocusRect(dc, &focus);
     }
-}
-
-static void ShowSystemInformation(HWND owner) {
-    MEMORYSTATUSEX memory;
-    ZeroMemory(&memory, sizeof(memory));
-    memory.dwLength = sizeof(memory);
-    BOOL have_memory = GlobalMemoryStatusEx(&memory);
-    unsigned long long memory_gb = have_memory
-        ? (memory.ullTotalPhys + (1ULL << 30) - 1) >> 30 : 0;
-
-    wchar_t output_folder[MAX_PATH] = L"";
-    if (g_folder_edit && IsWindow(g_folder_edit)) {
-        GetWindowTextW(g_folder_edit, output_folder, MAX_PATH);
-    }
-    if (!output_folder[0]) {
-        if (g_saved_folder[0]) StringCchCopyW(output_folder, MAX_PATH, g_saved_folder);
-        else GetDefaultOutputFolder(output_folder, MAX_PATH);
-    }
-
-    wchar_t message[1400];
-    if (have_memory) {
-        StringCchPrintfW(message, 1400,
-            L"Febius Downrush %s\r\n\r\n"
-            L"실행 환경\r\nWindows x64 · 논리 프로세서 %lu개 · 메모리 %llu GB\r\n\r\n"
-            L"동시 처리\r\n정보 조회 %d개 · 다운로드 %d개\r\n\r\n"
-            L"응용 프로그램 데이터\r\n%s\r\n\r\n"
-            L"음악 저장 폴더\r\n%s",
-            APP_VERSION_W, g_processor_count, memory_gb,
-            MetadataWorkerLimit(), DownloadWorkerLimit(),
-            g_local_app_dir[0] ? g_local_app_dir : L"준비 중", output_folder);
-    } else {
-        StringCchPrintfW(message, 1400,
-            L"Febius Downrush %s\r\n\r\n"
-            L"실행 환경\r\nWindows x64 · 논리 프로세서 %lu개\r\n\r\n"
-            L"동시 처리\r\n정보 조회 %d개 · 다운로드 %d개\r\n\r\n"
-            L"응용 프로그램 데이터\r\n%s\r\n\r\n"
-            L"음악 저장 폴더\r\n%s",
-            APP_VERSION_W, g_processor_count,
-            MetadataWorkerLimit(), DownloadWorkerLimit(),
-            g_local_app_dir[0] ? g_local_app_dir : L"준비 중", output_folder);
-    }
-    MessageBoxW(owner, message, L"Downrush 시스템 정보",
-                MB_OK | MB_ICONINFORMATION);
 }
 
 static INT_PTR CALLBACK AboutDialogProc(HWND dialog, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_INITDIALOG:
             CenterDialog(dialog);
+            SendMessageW(dialog, DM_SETDEFID, IDOK, 0);
             return TRUE;
         case WM_DRAWITEM:
             if ((UINT)wParam == IDC_ABOUT_BANNER) {
                 DrawAboutCanvas((const DRAWITEMSTRUCT *)lParam);
                 return TRUE;
             }
-            if ((UINT)wParam == IDC_ABOUT_UPDATE ||
-                (UINT)wParam == IDC_ABOUT_RELEASES ||
-                (UINT)wParam == IDC_ABOUT_LICENSE ||
-                (UINT)wParam == IDC_ABOUT_SYSTEM) {
+            if ((UINT)wParam == IDC_ABOUT_LICENSE || (UINT)wParam == IDOK) {
                 DrawAboutActionButton((const DRAWITEMSTRUCT *)lParam);
                 return TRUE;
             }
             break;
         case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_ABOUT_UPDATE) {
-                EndDialog(dialog, IDC_ABOUT_UPDATE);
-                PostMessageW(g_main, WM_COMMAND,
-                             MAKEWPARAM(IDM_HELP_CHECK_UPDATES, 0), 0);
-                return TRUE;
-            }
             if (LOWORD(wParam) == IDC_ABOUT_LICENSE) {
-                OpenThirdPartyNotices(dialog);
-                return TRUE;
-            }
-            if (LOWORD(wParam) == IDC_ABOUT_RELEASES) {
-                OpenWebPage(dialog, RELEASES_URL);
-                return TRUE;
-            }
-            if (LOWORD(wParam) == IDC_ABOUT_SYSTEM) {
-                ShowSystemInformation(dialog);
+                OpenApplicationLicense(dialog);
                 return TRUE;
             }
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
@@ -3569,7 +3625,11 @@ cleanup:
     if (g_splash_title_font) DeleteObject(g_splash_title_font);
     if (g_splash_body_font) DeleteObject(g_splash_body_font);
     if (g_splash_brand_font) DeleteObject(g_splash_brand_font);
-    if (g_splash_small_font) DeleteObject(g_splash_small_font);
+    if (g_about_brand_font) DeleteObject(g_about_brand_font);
+    if (g_about_title_font) DeleteObject(g_about_title_font);
+    if (g_about_section_font) DeleteObject(g_about_section_font);
+    if (g_about_body_font) DeleteObject(g_about_body_font);
+    if (g_about_series_font) DeleteObject(g_about_series_font);
     if (g_brand_symbol) DestroyIcon(g_brand_symbol);
     if (g_downrush_icon) DestroyIcon(g_downrush_icon);
     History_Shutdown();
