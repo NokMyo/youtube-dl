@@ -1,11 +1,9 @@
-# Febius 브랜드 이미지
+# Febius Branding Assets
 
-브랜드 원본 이미지는 이 폴더에 보관합니다.
+| 파일 | 용도 |
+|---|---|
+| `febius-symbol.svg` | Febius 공통 심볼 원본 |
+| `src/febius-symbol.ico` | Windows용 Febius 심볼 |
+| `src/app.ico` | Downrush 제품 및 실행 파일 아이콘 |
 
-- `febius-symbol.svg`: Febius 전체 제품군 공통 심볼 원본
-- `src/febius-symbol.ico`: 원본 SVG에서 만든 16·24·32·48·64·128·256px Windows 심볼 자원
-- `src/app.ico`: 실행 파일·작업 표시줄·창·로딩창·프로그램 정보에 공통으로 쓰는 16·24·32·48·64·128·256px Downrush 제품 아이콘
-
-두 ICO는 `src/app.rc`에 Windows 자원으로 포함됩니다. 화면 표시가 불가능한 예외 상황에서만 가벼운 벡터 대체 표시를 사용하며, 누락된 자원은 핵심 자체 검사가 감지합니다.
-
-Febius 심볼을 교체할 때는 SVG와 다중 크기 ICO를 함께 갱신합니다. Downrush 아이콘을 교체할 때도 같은 일곱 크기를 모두 유지해야 작은 작업 표시줄과 고해상도 화면에서 선명하게 표시됩니다.
+ICO 파일은 16·24·32·48·64·128·256px 크기를 포함하고 `src/app.rc`에서 Windows 자원으로 등록합니다. 심볼 변경 시 SVG와 ICO를 함께 갱신하세요.
