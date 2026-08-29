@@ -23,10 +23,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           function Replace-Once([string]$Path, [string]$Old, [string]$New) {
-            $text = Get-Content -LiteralPath $Path -Raw
-            $count = ([regex]::Matches($text, [regex]::Escape($Old))).Count
-            if ($count -ne 1) { throw "Expected exactly one match in $Path, found $count.`nOLD:`n$Old" }
-            $text = $text.Replace($Old, $New)
+            $text = (Get-Content -LiteralPath $Path -Raw).Replace("`r`n", "`n")
+            $oldNormalized = $Old.Replace("`r`n", "`n")
+            $newNormalized = $New.Replace("`r`n", "`n")
+            $count = ([regex]::Matches($text, [regex]::Escape($oldNormalized))).Count
+            if ($count -ne 1) { throw "Expected exactly one match in $Path, found $count.`nOLD:`n$oldNormalized" }
+            $text = $text.Replace($oldNormalized, $newNormalized)
             [IO.File]::WriteAllText((Resolve-Path $Path), $text, [Text.UTF8Encoding]::new($false))
           }
 
