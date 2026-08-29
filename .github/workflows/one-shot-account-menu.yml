@@ -81,14 +81,12 @@ jobs:
           '@
 
           Replace-Once 'src/main.c' @'
-                  case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
-                  case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+          case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
           '@ @'
-                  case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
-                  case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); break;
-                  case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); break;
-                  case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
-                  case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+          case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
+          case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); break;
+          case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); break;
+          case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
           '@
 
       - name: Configure
