@@ -14,6 +14,7 @@
 #include <wctype.h>
 #include <string.h>
 
+#include "account.h"
 #include "command_line.h"
 #include "filename.h"
 #include "history.h"
@@ -107,6 +108,9 @@
 #define IDM_OPT_SIZE            2044
 #define IDM_OPT_AUTO_UPDATE     2045
 #define IDM_OPT_FINGERPRINT     2046
+#define IDM_ACCOUNT_LOGIN       2060
+#define IDM_ACCOUNT_STATUS      2061
+#define IDM_ACCOUNT_LOGOUT      2062
 #define IDM_QUALITY_128         2050
 #define IDM_QUALITY_192         2051
 #define IDM_QUALITY_256         2052
@@ -2315,6 +2319,7 @@ static HMENU CreateAppMenu(void) {
     HMENU file = CreatePopupMenu();
     HMENU job = CreatePopupMenu();
     HMENU tools = CreatePopupMenu();
+    HMENU account = CreatePopupMenu();
     HMENU help = CreatePopupMenu();
     g_options_menu = CreatePopupMenu();
     g_quality_menu = CreatePopupMenu();
@@ -2353,6 +2358,12 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_REFRESH_STATS, L"폴더 정보 새로 고침");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_LOG, L"진단 로그 열기");
+
+    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGIN, L"Febius 계정 로그인...");
+    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_STATUS, L"내 계정 정보");
+    AppendMenuW(account, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGOUT, L"로그아웃");
+
     AppendMenuW(help, MF_STRING, IDM_HELP_CHECK_UPDATES, L"업데이트 확인...");
     AppendMenuW(help, MF_STRING, IDM_HELP_RELEASES, L"릴리스 정보 보기");
     AppendMenuW(help, MF_SEPARATOR, 0, NULL);
@@ -2362,6 +2373,7 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)job, L"작업(&A)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)g_options_menu, L"옵션(&O)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)tools, L"도구(&T)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)account, L"계정(&C)");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"도움말(&H)");
     SyncOptionMenuChecks();
     return bar;
@@ -3246,6 +3258,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(FALSE); break;
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
+case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); break;
+case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); break;
+case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
                 case IDM_OPT_DEDUP:
