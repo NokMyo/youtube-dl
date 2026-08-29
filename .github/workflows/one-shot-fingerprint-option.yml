@@ -128,9 +128,9 @@ jobs:
           '@
 
           Replace-Once 'README.md' @'
-          - 다운로드 기록 및 Chromaprint 오디오 지문 기반 중복 검사
+          - Chromaprint `fpcalc` 기반 오디오 지문 중복 판별
           '@ @'
-          - 다운로드 기록 및 Chromaprint 오디오 지문 기반 중복 검사
+          - Chromaprint `fpcalc` 기반 오디오 지문 중복 판별
           - 옵션에서 `동일 녹음 음원 지문 중복 검사`를 독립적으로 켜고 끌 수 있음 (기본값: 켜짐)
           '@
 
