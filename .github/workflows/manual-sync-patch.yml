@@ -1,0 +1,36 @@
+name: Apply manual saved-link sync
+
+on:
+  push:
+    paths:
+      - '.github/workflows/manual-sync-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch source
+        run: python scripts/manual_sync_patch.py
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Core self-test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build -Recurse -Filter FebiusDownrush.exe | Select-Object -First 1
+          if (-not $exe) { throw 'FebiusDownrush.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test-core' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "self-test failed: $($p.ExitCode)" }
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "NokMyo"
+          git config user.email "82665094+NokMyo@users.noreply.github.com"
+          git add src/main.c
+          git commit -m "Make saved link sync manual"
+          git push
