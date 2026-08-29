@@ -2664,50 +2664,6 @@ static void DrawFebiusLockup(HDC dc, int x, int y, int symbol_size) {
     SelectObject(dc, old_font);
 }
 
-static void DrawParallelogram(HDC dc, int x, int y, int width, int height,
-                              COLORREF color) {
-    int slant = height / 3;
-    POINT points[4] = {
-        { x + slant, y }, { x + width, y },
-        { x + width - slant, y + height }, { x, y + height }
-    };
-    FillPolygonColor(dc, points, 4, color);
-}
-
-static void DrawBrandGeometry(HDC dc, RECT area) {
-    int width = area.right - area.left;
-    int height = area.bottom - area.top;
-    if (!dc || width < 80 || height < 80) return;
-
-    HGDIOBJ old_pen = SelectObject(dc, GetStockObject(DC_PEN));
-    COLORREF previous_pen = SetDCPenColor(dc, RGB(232, 235, 241));
-    for (int i = 1; i <= 4; ++i) {
-        int x = area.left + width * i / 5;
-        MoveToEx(dc, x, area.top, NULL);
-        LineTo(dc, x - height / 5, area.bottom);
-    }
-    for (int i = 1; i <= 4; ++i) {
-        int y = area.top + height * i / 5;
-        MoveToEx(dc, area.left, y, NULL);
-        LineTo(dc, area.right, y);
-    }
-    SetDCPenColor(dc, previous_pen);
-    SelectObject(dc, old_pen);
-
-    int tile_width = width / 4;
-    int tile_height = height / 7;
-    DrawParallelogram(dc, area.left + width / 4, area.top + height / 8,
-                      tile_width, tile_height, RGB(224, 230, 246));
-    DrawParallelogram(dc, area.left + width / 2, area.top + height / 8,
-                      tile_width, tile_height, RGB(237, 239, 246));
-    DrawParallelogram(dc, area.left + width / 5, area.top + height * 2 / 5,
-                      tile_width, tile_height, RGB(39, 102, 229));
-    DrawParallelogram(dc, area.left + width * 3 / 5, area.top + height / 2,
-                      tile_width, tile_height, RGB(190, 232, 227));
-    DrawParallelogram(dc, area.left + width * 2 / 3, area.top + height * 3 / 4,
-                      tile_width, tile_height, RGB(219, 215, 241));
-}
-
 static void DrawDownrushProductMark(HDC dc, int x, int y, int size) {
     if (g_downrush_icon) {
         DrawIconEx(dc, x, y, g_downrush_icon,
@@ -2820,11 +2776,6 @@ static LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             FillRectColor(dc, &client, RGB(252, 252, 253));
             SetBkMode(dc, TRANSPARENT);
 
-            RECT geometry = {
-                client.right - ScaleUi(286), ScaleUi(42),
-                client.right - ScaleUi(18), client.bottom - ScaleUi(24)
-            };
-            DrawBrandGeometry(dc, geometry);
             DrawFebiusLockup(dc, ScaleUi(38), ScaleUi(28), ScaleUi(30));
 
             HFONT title_font = g_splash_title_font
@@ -2971,77 +2922,6 @@ static void OpenApplicationLicense(HWND owner) {
         L"Febius Downrush License", MB_OK | MB_ICONINFORMATION);
 }
 
-static void DrawAboutGeometry(HDC dc, RECT area) {
-    int width = area.right - area.left;
-    int height = area.bottom - area.top;
-    if (!dc || width < 100 || height < 100) return;
-
-    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
-    HGDIOBJ old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
-    COLORREF old_brush_color = SetDCBrushColor(dc, RGB(243, 243, 245));
-    Ellipse(dc, area.left - width * 16 / 100, area.top + height * 8 / 100,
-            area.left + width * 30 / 100, area.top + height * 78 / 100);
-
-    RECT teal = {
-        area.left + width * 20 / 100, area.top + height * 59 / 100,
-        area.left + width * 38 / 100, area.bottom
-    };
-    RECT blue = {
-        area.left + width * 31 / 100, area.top + height * 25 / 100,
-        area.left + width * 49 / 100, area.top + height * 59 / 100
-    };
-    RECT pale = {
-        area.left + width * 38 / 100, area.top + height * 31 / 100,
-        area.left + width * 63 / 100, area.bottom
-    };
-    RECT purple = {
-        area.left + width * 47 / 100, area.top + height * 82 / 100,
-        area.left + width * 58 / 100, area.bottom
-    };
-    RECT black = {
-        area.left + width * 56 / 100, area.top + height * 72 / 100,
-        area.left + width * 78 / 100, area.bottom
-    };
-    FillRectColor(dc, &teal, RGB(57, 168, 162));
-    FillRectColor(dc, &blue, RGB(30, 78, 191));
-    FillRectColor(dc, &pale, RGB(232, 233, 236));
-    FillRectColor(dc, &purple, RGB(70, 55, 150));
-    FillRectColor(dc, &black, RGB(27, 30, 36));
-
-    SelectObject(dc, GetStockObject(DC_PEN));
-    COLORREF old_pen_color = SetDCPenColor(dc, RGB(43, 100, 224));
-    Arc(dc, area.left - width * 16 / 100, area.top + height * 38 / 100,
-        area.left + width * 61 / 100, area.top + height * 125 / 100,
-        area.left + width * 55 / 100, area.top + height * 69 / 100,
-        area.left, area.top + height * 91 / 100);
-    SetDCPenColor(dc, RGB(151, 155, 165));
-    Arc(dc, area.left + width * 60 / 100, area.top + height * 3 / 100,
-        area.left + width * 111 / 100, area.top + height * 98 / 100,
-        area.left + width * 106 / 100, area.top + height * 37 / 100,
-        area.left + width * 62 / 100, area.top + height * 92 / 100);
-
-    SelectObject(dc, GetStockObject(DC_BRUSH));
-    SelectObject(dc, GetStockObject(NULL_PEN));
-    SetDCBrushColor(dc, RGB(188, 192, 201));
-    int dot_size = ScaleUi(2);
-    if (dot_size < 2) dot_size = 2;
-    int dot_start_x = area.left + width * 49 / 100;
-    int dot_start_y = area.top + height * 6 / 100;
-    int dot_gap = ScaleUi(9);
-    for (int row = 0; row < 6; ++row) {
-        for (int column = 0; column < 6; ++column) {
-            int x = dot_start_x + column * dot_gap;
-            int y = dot_start_y + row * dot_gap;
-            Ellipse(dc, x, y, x + dot_size, y + dot_size);
-        }
-    }
-
-    SetDCBrushColor(dc, old_brush_color);
-    SetDCPenColor(dc, old_pen_color);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-}
-
 static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
     if (!item || !item->hDC) return;
     HDC dc = item->hDC;
@@ -3061,8 +2941,6 @@ static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
     SetDCPenColor(dc, previous_pen);
     SelectObject(dc, old_pen);
 
-    RECT geometry = { bounds.left, bounds.top + height * 39 / 100, split, footer_top };
-    DrawAboutGeometry(dc, geometry);
     SetBkMode(dc, TRANSPARENT);
 
     HFONT brand_font = g_about_brand_font
@@ -3150,7 +3028,7 @@ static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
         right_left, bounds.top + height * 32 / 100,
         right_right, bounds.top + height * 39 / 100
     };
-    DrawTextW(dc, L"Standard User License", -1, &license_value,
+    DrawTextW(dc, L"Standard", -1, &license_value,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     int second_line_y = bounds.top + height * 43 / 100;
     MoveToEx(dc, right_left, second_line_y, NULL);
@@ -3170,7 +3048,7 @@ static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
         right_left, bounds.top + height * 56 / 100,
         right_right, bounds.top + height * 63 / 100
     };
-    DrawTextW(dc, L"© 2026 Febius Software", -1, &copyright_owner,
+    DrawTextW(dc, L"© 2026 NokMyo", -1, &copyright_owner,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     RECT copyright_rights = {
         right_left, bounds.top + height * 63 / 100,
@@ -3179,13 +3057,6 @@ static void DrawAboutCanvas(const DRAWITEMSTRUCT *item) {
     DrawTextW(dc, L"All rights reserved.", -1, &copyright_rights,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 
-    SetTextColor(dc, RGB(84, 88, 98));
-    RECT support = {
-        bounds.left + width * 4 / 100, footer_top,
-        split, bounds.bottom
-    };
-    DrawTextW(dc, L"support@febius.com", -1, &support,
-              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     SelectObject(dc, old_font);
 }
 
