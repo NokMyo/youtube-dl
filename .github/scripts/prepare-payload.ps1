@@ -61,6 +61,20 @@ $ffprobe = Get-ChildItem 'ffmpeg-dist' -Recurse -Filter 'ffprobe.exe' | Select-O
 if (-not $ffmpeg -or -not $ffprobe) { throw 'FFmpeg binaries were not found.' }
 Copy-Item $ffmpeg.FullName 'payload/ffmpeg.exe'
 Copy-Item $ffprobe.FullName 'payload/ffprobe.exe'
+
+$chromaprintVersion = '1.6.1'
+$chromaprintSha256 = '735d6182b38e9f364b84ce6f4ccd682c75e2851de89735711d6b762d12b92a4e'
+$chromaprintUrl = "https://github.com/acoustid/chromaprint/releases/download/v$chromaprintVersion/chromaprint-fpcalc-$chromaprintVersion-windows-x86_64.zip"
+Invoke-VerifiedDownload -Uri $chromaprintUrl -OutFile 'chromaprint.zip' -Sha256 $chromaprintSha256
+Expand-Archive -LiteralPath 'chromaprint.zip' -DestinationPath 'chromaprint-dist' -Force
+$fpcalc = Get-ChildItem 'chromaprint-dist' -Recurse -Filter 'fpcalc.exe' | Select-Object -First 1
+if (-not $fpcalc) { throw 'Chromaprint fpcalc executable was not found.' }
+Copy-Item $fpcalc.FullName 'payload/fpcalc.exe'
+$fpcalcVersionOutput = & 'payload/fpcalc.exe' -version 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $fpcalcVersionOutput -notmatch [regex]::Escape($chromaprintVersion)) {
+  throw 'Chromaprint fpcalc version check failed.'
+}
+
 Copy-Item 'LICENSE.txt' 'payload/APPLICATION_LICENSE.txt'
 
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.GPLv3' -OutFile 'payload/GPL-3.0.txt'
@@ -70,6 +84,7 @@ Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/yt-dlp/ejs/$ejsV
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/davidbonnet/astring/v1.9.0/LICENSE' -OutFile 'payload/ASTRING-MIT-LICENSE.txt'
 Invoke-VerifiedDownload -Uri 'https://raw.githubusercontent.com/meriyah/meriyah/v6.1.4/LICENSE.md' -OutFile 'payload/MERIYAH-ISC-LICENSE.txt'
 Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/denoland/deno/v$denoVersion/LICENSE.md" -OutFile 'payload/DENO-MIT-LICENSE.txt'
+Invoke-VerifiedDownload -Uri "https://raw.githubusercontent.com/acoustid/chromaprint/v$chromaprintVersion/LICENSE.md" -OutFile 'payload/CHROMAPRINT-LICENSE.md'
 
 $ffmpegLicense = & 'payload/ffmpeg.exe' -hide_banner -L 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the FFmpeg license information.' }
@@ -99,6 +114,11 @@ $ffmpegLicense | Set-Content -Encoding UTF8 'payload/FFMPEG-LICENSE.txt'
   '   Build information: https://www.gyan.dev/ffmpeg/builds/',
   '   Details: FFMPEG-LICENSE.txt',
   '',
+  "4. Chromaprint fpcalc $chromaprintVersion",
+  '   License: LGPL 2.1 (Chromaprint source itself is MIT; see upstream license)',
+  '   Source: https://github.com/acoustid/chromaprint',
+  '   Details: CHROMAPRINT-LICENSE.md',
+  '',
   'The complete GPL version 3 text is included as GPL-3.0.txt.',
   'These projects are independent of and are not endorsed by NokMyo.'
 ) | Set-Content -Encoding UTF8 'payload/THIRD_PARTY_NOTICES.txt'
@@ -107,5 +127,6 @@ $ffmpegLicense | Set-Content -Encoding UTF8 'payload/FFMPEG-LICENSE.txt'
   "yt-dlp $ytDlpVersion  SHA256 $ytDlpSha256",
   "yt-dlp-ejs $ejsVersion (bundled in yt-dlp.exe)",
   "Deno $denoVersion  SHA256 $denoSha256",
-  "FFmpeg Gyan Essentials $ffmpegVersion  SHA256 $ffmpegSha256"
+  "FFmpeg Gyan Essentials $ffmpegVersion  SHA256 $ffmpegSha256",
+  "Chromaprint fpcalc $chromaprintVersion  SHA256 $chromaprintSha256"
 ) | Set-Content -Encoding UTF8 'payload/DEPENDENCY_VERSIONS.txt'
