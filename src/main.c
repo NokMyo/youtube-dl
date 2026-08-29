@@ -229,6 +229,7 @@ static HWND g_download_button;
 static HWND g_cancel_button;
 static HMENU g_options_menu;
 static HMENU g_quality_menu;
+static HMENU g_account_menu;
 static HFONT g_font;
 static HFONT g_splash_title_font;
 static HFONT g_splash_body_font;
@@ -2361,11 +2362,15 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_HISTORY, L"다운로드 기록 열기");
     AppendMenuW(tools, MF_STRING, IDM_TOOLS_OPEN_LOG, L"진단 로그 열기");
 
-    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGIN, L"Febius 계정 로그인...");
-    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_STATUS, L"내 계정 정보");
-    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_SYNC, L"저장된 링크 가져오기");
-    AppendMenuW(account, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGOUT, L"로그아웃");
+    g_account_menu = account;
+    if (Account_HasSavedSession()) {
+        AppendMenuW(account, MF_STRING, IDM_ACCOUNT_STATUS, L"내 계정 정보");
+        AppendMenuW(account, MF_STRING, IDM_ACCOUNT_SYNC, L"저장된 링크 가져오기");
+        AppendMenuW(account, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGOUT, L"로그아웃");
+    } else {
+        AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGIN, L"Febius 계정 로그인...");
+    }
 
     AppendMenuW(help, MF_STRING, IDM_HELP_CHECK_UPDATES, L"업데이트 확인...");
     AppendMenuW(help, MF_STRING, IDM_HELP_RELEASES, L"릴리스 정보 보기");
@@ -2380,6 +2385,20 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"도움말(&H)");
     SyncOptionMenuChecks();
     return bar;
+}
+
+static void RefreshAccountMenu(void) {
+    if (!g_account_menu) return;
+    while (GetMenuItemCount(g_account_menu) > 0) DeleteMenu(g_account_menu, 0, MF_BYPOSITION);
+    if (Account_HasSavedSession()) {
+        AppendMenuW(g_account_menu, MF_STRING, IDM_ACCOUNT_STATUS, L"내 계정 정보");
+        AppendMenuW(g_account_menu, MF_STRING, IDM_ACCOUNT_SYNC, L"저장된 링크 가져오기");
+        AppendMenuW(g_account_menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(g_account_menu, MF_STRING, IDM_ACCOUNT_LOGOUT, L"로그아웃");
+    } else {
+        AppendMenuW(g_account_menu, MF_STRING, IDM_ACCOUNT_LOGIN, L"Febius 계정 로그인...");
+    }
+    if (g_main) DrawMenuBar(g_main);
 }
 
 static void CreateUi(HWND hwnd) {
@@ -3261,8 +3280,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(FALSE); break;
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
-case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); break;
-case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); break;
+case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); RefreshAccountMenu(); break;
+case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); RefreshAccountMenu(); break;
 case IDM_ACCOUNT_SYNC:
     if (!Account_HasSavedSession()) {
         MessageBoxW(hwnd, L"Febius 계정에 먼저 로그인해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
@@ -3276,7 +3295,7 @@ case IDM_ACCOUNT_SYNC:
         MessageBoxW(hwnd, L"링크 가져오기를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONWARNING);
     }
     break;
-case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
+case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); RefreshAccountMenu(); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
                 case IDM_OPT_DEDUP:

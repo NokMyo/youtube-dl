@@ -438,6 +438,95 @@ void Account_ShowLogin(HWND owner) {
     SetForegroundWindow(owner);
 }
 
+typedef struct AccountInfoWindowState {
+    wchar_t username[128];
+} AccountInfoWindowState;
+
+static LRESULT CALLBACK AccountInfoWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    AccountInfoWindowState *state = (AccountInfoWindowState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW *create = (CREATESTRUCTW *)lParam;
+        state = (AccountInfoWindowState *)create->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+    }
+    switch (msg) {
+        case WM_CREATE: {
+            HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            HWND brand = CreateWindowW(L"STATIC", L"Febius", WS_CHILD | WS_VISIBLE,
+                                       24, 20, 260, 30, hwnd, NULL, NULL, NULL);
+            HWND section = CreateWindowW(L"STATIC", L"Account Information", WS_CHILD | WS_VISIBLE,
+                                         24, 50, 260, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                          24, 78, 352, 2, hwnd, NULL, NULL, NULL);
+            const wchar_t *labels[] = { L"계정", L"제품", L"플랜", L"라이선스" };
+            const wchar_t *values[] = { state ? state->username : L"-", L"Febius Downrush", L"Standard", L"확인됨" };
+            for (int i = 0; i < 4; ++i) {
+                HWND label = CreateWindowW(L"STATIC", labels[i], WS_CHILD | WS_VISIBLE,
+                                           26, 102 + i * 36, 82, 22, hwnd, NULL, NULL, NULL);
+                HWND value = CreateWindowW(L"STATIC", values[i], WS_CHILD | WS_VISIBLE,
+                                           122, 102 + i * 36, 244, 22, hwnd, NULL, NULL, NULL);
+                SendMessageW(label, WM_SETFONT, (WPARAM)font, TRUE);
+                SendMessageW(value, WM_SETFONT, (WPARAM)font, TRUE);
+            }
+            HWND close = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                       286, 258, 90, 30, hwnd, (HMENU)(INT_PTR)IDOK, NULL, NULL);
+            SendMessageW(brand, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(section, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(close, WM_SETFONT, (WPARAM)font, TRUE);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void ShowAccountInfoWindow(HWND owner, const wchar_t *username) {
+    static ATOM atom = 0;
+    if (!atom) {
+        WNDCLASSW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = AccountInfoWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"FebiusDownrushAccountInfo";
+        atom = RegisterClassW(&wc);
+        if (!atom && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+    }
+    AccountInfoWindowState state;
+    ZeroMemory(&state, sizeof(state));
+    StringCchCopyW(state.username, 128, username && *username ? username : L"알 수 없음");
+    RECT owner_rect = {0};
+    GetWindowRect(owner, &owner_rect);
+    int width = 420, height = 340;
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 2;
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"FebiusDownrushAccountInfo",
+                                  L"Febius 계정 정보", WS_CAPTION | WS_SYSMENU,
+                                  x, y, width, height, owner, NULL, GetModuleHandleW(NULL), &state);
+    if (!window) return;
+    EnableWindow(owner, FALSE);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    MSG msg;
+    while (IsWindow(window) && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (!IsDialogMessageW(window, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+}
+
 void Account_ShowStatus(HWND owner) {
     char token[ACCOUNT_TOKEN_MAX];
     if (!LoadToken(token, sizeof(token))) {
@@ -466,14 +555,11 @@ void Account_ShowStatus(HWND owner) {
 
     char username_utf8[128];
     wchar_t username[128];
-    wchar_t message[512];
     if (!ExtractJsonString(response, "username", username_utf8, sizeof(username_utf8)) ||
         !WideFromUtf8(username_utf8, username, sizeof(username) / sizeof(username[0]))) {
-        StringCchCopyW(username, sizeof(username) / sizeof(username[0]), L"알 수 없음");
+        StringCchCopyW(username, 128, L"알 수 없음");
     }
-    StringCchPrintfW(message, sizeof(message) / sizeof(message[0]),
-                     L"로그인됨\n\n계정: %s\n제품: Downrush\n상태: 사용 가능", username);
-    MessageBoxW(owner, message, L"Febius 계정", MB_OK | MB_ICONINFORMATION);
+    ShowAccountInfoWindow(owner, username);
 }
 
 void Account_Logout(HWND owner) {
