@@ -44,6 +44,7 @@
 #define BUNDLE_FOOTER_BYTES 48
 #define IDT_SPLASH_ANIMATE 1
 #define IDT_AUTO_UPDATE 3
+#define IDT_ACCOUNT_SYNC 4
 
 #define IDC_URL_EDIT            1001
 #define IDC_ADD_LINKS           1002
@@ -84,6 +85,7 @@
 #define WM_APP_SPLASH_STATUS    (WM_APP + 11)
 #define WM_APP_UPDATE_PROGRESS  (WM_APP + 12)
 #define WM_APP_UPDATE_READY     (WM_APP + 13)
+#define WM_APP_ACCOUNT_SYNC     (WM_APP + 14)
 
 #define IDM_FILE_LOAD_TXT       2001
 #define IDM_FILE_BROWSE_FOLDER  2002
@@ -3347,6 +3349,23 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
             return 0;
         }
 
+        case WM_APP_ACCOUNT_SYNC: {
+            AccountSyncResult *sync = (AccountSyncResult *)lParam;
+            if (!sync) return 0;
+            BOOL idle = !InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) &&
+                        !InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) &&
+                        !InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0);
+            if (sync->links_text && sync->links_text[0] && idle && ToolsAvailable() &&
+                GetWindowTextLengthW(g_url_edit) == 0) {
+                SetWindowTextW(g_url_edit, sync->links_text);
+                AddUrlsFromEdit();
+                Account_AcknowledgeSyncAsync(sync->max_link_id);
+                SetControlText(g_status, L"상태: Febius 웹 보관 링크를 불러왔습니다.");
+            }
+            Account_FreeSyncResult(sync);
+            return 0;
+        }
+
         case WM_APP_FOLDER_STATS:
             ApplyFolderStatsResult((FolderStatsResult *)lParam);
             return 0;
@@ -3431,6 +3450,8 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
             SetStartupPhase(4);
             ShowMainAfterSplash(hwnd);
             if (ShouldCheckUpdatesAutomatically()) SetTimer(hwnd, IDT_AUTO_UPDATE, 1500, NULL);
+            SetTimer(hwnd, IDT_ACCOUNT_SYNC, 10000, NULL);
+            Account_RequestSync(hwnd, WM_APP_ACCOUNT_SYNC);
             CloseAfterWorkersIfRequested();
             return 0;
 
@@ -3438,6 +3459,12 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
             if (wParam == IDT_AUTO_UPDATE) {
                 KillTimer(hwnd, IDT_AUTO_UPDATE);
                 StartUpdateCheck(TRUE);
+            } else if (wParam == IDT_ACCOUNT_SYNC) {
+                BOOL idle = !InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) &&
+                            !InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) &&
+                            !InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0);
+                if (idle && GetWindowTextLengthW(g_url_edit) == 0)
+                    Account_RequestSync(hwnd, WM_APP_ACCOUNT_SYNC);
             }
             return 0;
 

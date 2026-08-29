@@ -4,6 +4,7 @@
 #include <wincrypt.h>
 #include <strsafe.h>
 #include <stdio.h>
+#include <process.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -486,4 +487,112 @@ void Account_Logout(HWND owner) {
     }
     ClearToken();
     MessageBoxW(owner, L"Febius 계정에서 로그아웃했습니다.", L"Febius 계정", MB_OK | MB_ICONINFORMATION);
+}
+
+
+static volatile LONG g_account_sync_running = 0;
+
+typedef struct AccountSyncWork { HWND target; UINT message; } AccountSyncWork;
+typedef struct AccountAckWork { LONGLONG last_link_id; } AccountAckWork;
+
+static BOOL ExtractJsonInt64(const char *json, const char *key, LONGLONG *value) {
+    if (!json || !key || !value) return FALSE;
+    char needle[128];
+    if (FAILED(StringCchPrintfA(needle, sizeof(needle), "\"%s\":", key))) return FALSE;
+    const char *p = strstr(json, needle);
+    if (!p) return FALSE;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') ++p;
+    char *end = NULL;
+    long long parsed = _strtoi64(p, &end, 10);
+    if (end == p) return FALSE;
+    *value = (LONGLONG)parsed;
+    return TRUE;
+}
+
+void Account_FreeSyncResult(AccountSyncResult *result) {
+    if (!result) return;
+    free(result->links_text);
+    free(result);
+}
+
+static unsigned __stdcall AccountSyncWorker(void *param) {
+    AccountSyncWork *work = (AccountSyncWork *)param;
+    char token[ACCOUNT_TOKEN_MAX];
+    if (!work || !LoadToken(token, sizeof(token))) {
+        free(work);
+        InterlockedExchange((LONG *)&g_account_sync_running, 0);
+        return 0;
+    }
+    DWORD status = 0;
+    char *response = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
+    BOOL ok = response && HttpRequest(L"GET", L"/api/app/sync", NULL, token,
+                                      &status, response, ACCOUNT_RESPONSE_MAX);
+    SecureZeroMemory(token, sizeof(token));
+    if (!ok || status != 200) {
+        if (status == 401 || status == 403) ClearToken();
+        free(response); free(work);
+        InterlockedExchange((LONG *)&g_account_sync_running, 0);
+        return 0;
+    }
+    char *links_utf8 = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
+    LONGLONG max_id = 0;
+    AccountSyncResult *result = NULL;
+    if (links_utf8 && ExtractJsonString(response, "links_text", links_utf8, ACCOUNT_RESPONSE_MAX) &&
+        ExtractJsonInt64(response, "max_id", &max_id)) {
+        int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, links_utf8, -1, NULL, 0);
+        if (chars > 0) {
+            result = (AccountSyncResult *)calloc(1, sizeof(*result));
+            if (result) {
+                result->links_text = (wchar_t *)calloc((size_t)chars, sizeof(wchar_t));
+                if (!result->links_text || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        links_utf8, -1, result->links_text, chars)) {
+                    Account_FreeSyncResult(result); result = NULL;
+                } else result->max_link_id = max_id;
+            }
+        }
+    }
+    if (links_utf8) { SecureZeroMemory(links_utf8, ACCOUNT_RESPONSE_MAX); free(links_utf8); }
+    free(response);
+    HWND target = work->target; UINT message = work->message; free(work);
+    InterlockedExchange((LONG *)&g_account_sync_running, 0);
+    if (result && (!IsWindow(target) || !PostMessageW(target, message, 0, (LPARAM)result)))
+        Account_FreeSyncResult(result);
+    return 0;
+}
+
+BOOL Account_RequestSync(HWND target, UINT message) {
+    if (!target || !message || !Account_HasSavedSession()) return FALSE;
+    if (InterlockedCompareExchange((LONG *)&g_account_sync_running, 1, 0) != 0) return FALSE;
+    AccountSyncWork *work = (AccountSyncWork *)calloc(1, sizeof(*work));
+    if (!work) { InterlockedExchange((LONG *)&g_account_sync_running, 0); return FALSE; }
+    work->target = target; work->message = message;
+    uintptr_t thread = _beginthreadex(NULL, 0, AccountSyncWorker, work, 0, NULL);
+    if (!thread) { free(work); InterlockedExchange((LONG *)&g_account_sync_running, 0); return FALSE; }
+    CloseHandle((HANDLE)thread);
+    return TRUE;
+}
+
+static unsigned __stdcall AccountAckWorker(void *param) {
+    AccountAckWork *work = (AccountAckWork *)param;
+    char token[ACCOUNT_TOKEN_MAX];
+    if (work && LoadToken(token, sizeof(token))) {
+        char body[128]; DWORD status = 0; char response[2048];
+        if (SUCCEEDED(StringCchPrintfA(body, sizeof(body), "{\"last_link_id\":%lld}",
+                                      (long long)work->last_link_id))) {
+            HttpRequest(L"POST", L"/api/app/sync", body, token, &status, response, sizeof(response));
+            if (status == 401 || status == 403) ClearToken();
+        }
+        SecureZeroMemory(token, sizeof(token));
+    }
+    free(work); return 0;
+}
+
+void Account_AcknowledgeSyncAsync(LONGLONG last_link_id) {
+    if (last_link_id <= 0 || !Account_HasSavedSession()) return;
+    AccountAckWork *work = (AccountAckWork *)calloc(1, sizeof(*work));
+    if (!work) return;
+    work->last_link_id = last_link_id;
+    uintptr_t thread = _beginthreadex(NULL, 0, AccountAckWorker, work, 0, NULL);
+    if (thread) CloseHandle((HANDLE)thread); else free(work);
 }
