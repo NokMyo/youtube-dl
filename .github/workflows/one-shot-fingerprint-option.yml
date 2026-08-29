@@ -94,9 +94,11 @@ jobs:
           '@
 
           Replace-Once 'src/main.c' @'
+                  case IDM_OPT_DEDUP:
                   case IDM_OPT_SKIP:
                   case IDM_OPT_SANITIZE:
           '@ @'
+                  case IDM_OPT_DEDUP:
                   case IDM_OPT_SKIP:
                   case IDM_OPT_FINGERPRINT:
                   case IDM_OPT_SANITIZE:
