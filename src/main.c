@@ -44,7 +44,6 @@
 #define BUNDLE_FOOTER_BYTES 48
 #define IDT_SPLASH_ANIMATE 1
 #define IDT_AUTO_UPDATE 3
-#define IDT_ACCOUNT_SYNC 4
 
 #define IDC_URL_EDIT            1001
 #define IDC_ADD_LINKS           1002
@@ -113,6 +112,7 @@
 #define IDM_ACCOUNT_LOGIN       2060
 #define IDM_ACCOUNT_STATUS      2061
 #define IDM_ACCOUNT_LOGOUT      2062
+#define IDM_ACCOUNT_SYNC        2063
 #define IDM_QUALITY_128         2050
 #define IDM_QUALITY_192         2051
 #define IDM_QUALITY_256         2052
@@ -2363,6 +2363,7 @@ static HMENU CreateAppMenu(void) {
 
     AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGIN, L"Febius 계정 로그인...");
     AppendMenuW(account, MF_STRING, IDM_ACCOUNT_STATUS, L"내 계정 정보");
+    AppendMenuW(account, MF_STRING, IDM_ACCOUNT_SYNC, L"저장된 링크 가져오기");
     AppendMenuW(account, MF_SEPARATOR, 0, NULL);
     AppendMenuW(account, MF_STRING, IDM_ACCOUNT_LOGOUT, L"로그아웃");
 
@@ -3262,6 +3263,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
 case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); break;
 case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); break;
+case IDM_ACCOUNT_SYNC:
+    if (!Account_HasSavedSession()) {
+        MessageBoxW(hwnd, L"Febius 계정에 먼저 로그인해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
+    } else if (g_meta_running || g_download_running || g_tools_loading) {
+        MessageBoxW(hwnd, L"현재 작업이 끝난 뒤 저장된 링크를 가져와 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
+    } else if (GetWindowTextLengthW(g_url_edit) != 0) {
+        MessageBoxW(hwnd, L"링크 입력칸을 비운 뒤 다시 시도해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
+    } else if (Account_RequestSync(hwnd, WM_APP_ACCOUNT_SYNC)) {
+        SetControlText(g_status, L"상태: Febius 웹의 저장된 링크 확인 중...");
+    } else {
+        MessageBoxW(hwnd, L"링크 가져오기를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONWARNING);
+    }
+    break;
 case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
@@ -3360,7 +3374,12 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
                 SetWindowTextW(g_url_edit, sync->links_text);
                 AddUrlsFromEdit();
                 Account_AcknowledgeSyncAsync(sync->max_link_id);
-                SetControlText(g_status, L"상태: Febius 웹 보관 링크를 불러왔습니다.");
+                SetControlText(g_status, L"상태: 저장된 링크를 불러왔습니다.");
+            } else if (!sync->links_text || !sync->links_text[0]) {
+                SetControlText(g_status, L"상태: 새로 가져올 저장된 링크가 없습니다.");
+                MessageBoxW(hwnd, L"새로 가져올 저장된 링크가 없습니다.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
+            } else {
+                SetControlText(g_status, L"상태: 지금은 저장된 링크를 가져올 수 없습니다.");
             }
             Account_FreeSyncResult(sync);
             return 0;
@@ -3450,8 +3469,6 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
             SetStartupPhase(4);
             ShowMainAfterSplash(hwnd);
             if (ShouldCheckUpdatesAutomatically()) SetTimer(hwnd, IDT_AUTO_UPDATE, 1500, NULL);
-            SetTimer(hwnd, IDT_ACCOUNT_SYNC, 10000, NULL);
-            Account_RequestSync(hwnd, WM_APP_ACCOUNT_SYNC);
             CloseAfterWorkersIfRequested();
             return 0;
 
@@ -3459,12 +3476,6 @@ case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); break;
             if (wParam == IDT_AUTO_UPDATE) {
                 KillTimer(hwnd, IDT_AUTO_UPDATE);
                 StartUpdateCheck(TRUE);
-            } else if (wParam == IDT_ACCOUNT_SYNC) {
-                BOOL idle = !InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) &&
-                            !InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) &&
-                            !InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0);
-                if (idle && GetWindowTextLengthW(g_url_edit) == 0)
-                    Account_RequestSync(hwnd, WM_APP_ACCOUNT_SYNC);
             }
             return 0;
 
