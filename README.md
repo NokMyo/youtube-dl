@@ -17,11 +17,11 @@ Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그�
 - 파일명 자동 정리·직접 편집 및 ID3 메타데이터 삽입
 - 예상 용량, 개별 진행률, 전체 진행률 표시
 - 다운로드 기록 기반 중복 검사
+- Chromaprint `fpcalc` 기반 오디오 지문 중복 판별
 - 작업 취소, 시간 제한, 하위 프로세스 종료 및 임시 파일 정리
 - CPU 수에 따른 동시 작업량 자동 조절
 - SHA-256 검증 기반 자동 업데이트 및 재시작
 - 설정 저장, 순환 진단 로그, 단일 인스턴스 실행
-- 향후 음원 지문 기반 중복 판별을 위한 Chromaprint `fpcalc` 내장
 
 ## 저장 경로
 
@@ -33,8 +33,11 @@ Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그�
 | 로그 | `%LOCALAPPDATA%\Febius\Downrush\logs\Downrush.log` |
 | 임시 작업 | `%TEMP%\Febius\Downrush` |
 | 다운로드 기록 | 출력 폴더의 `download_history.txt` |
+| 오디오 지문 기록 | 출력 폴더의 `audio_fingerprints.txt` |
 
 첫 실행 시 내장 도구를 프로그램 데이터 폴더에 준비합니다. 이후에는 도구 내용 식별값을 확인해 변경된 경우에만 다시 설치합니다. 기존 Febius YT MP3 Downloader 및 Seowol 설정과 기본 음악 폴더는 필요한 경우 자동 이전합니다.
+
+다운로드가 끝난 MP3는 `fpcalc`로 최대 120초 구간의 Chromaprint 오디오 지문을 생성합니다. 같은 저장 폴더에 동일한 지문을 가진 기존 곡이 있으면 새로 생성된 중복 파일을 제거하고 기존 파일을 다운로드 기록에 연결합니다. `fpcalc`를 사용할 수 없는 환경에서는 기존 URL·다운로드 기록 기반 중복 검사만 사용합니다.
 
 ## 사용법
 
