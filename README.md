@@ -1,6 +1,6 @@
 # Febius Downrush
 
-Febius Utility Series의 Windows용 YouTube MP3 일괄 다운로드 프로그램입니다. C와 Win32 API로 구현했으며 공식 릴리스는 `yt-dlp`, Deno, FFmpeg, ffprobe를 포함한 단일 EXE로 배포합니다.
+Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그램입니다. C와 Win32 API로 구현했으며 공식 릴리스는 `yt-dlp`, Deno, FFmpeg, ffprobe를 포함한 단일 EXE로 배포합니다.
 
 본인이 소유했거나 다운로드 허가를 받은 콘텐츠에만 사용하세요.
 
@@ -38,7 +38,7 @@ Febius Utility Series의 Windows용 YouTube MP3 일괄 다운로드 프로그램
 ## 사용법
 
 1. 공식 릴리스의 `FebiusDownrush.exe`를 실행합니다.
-2. YouTube 링크를 입력하거나 `.txt` 목록을 불러옵니다.
+2. 지원되는 미디어 링크를 입력하거나 `.txt` 목록을 불러옵니다.
 3. 음질과 저장 폴더를 확인합니다.
 4. `전체 다운로드`를 실행합니다.
 

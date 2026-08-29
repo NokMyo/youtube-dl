@@ -36,7 +36,7 @@
 #define META_SEP L"<<<YTMP3>>>"
 #define CLEAN_NAME_CCH 256
 #define APP_CLIENT_W 960
-#define APP_CLIENT_H 640
+#define APP_CLIENT_H 675
 #define META_WORKER_COUNT 4
 #define DOWNLOAD_WORKER_COUNT 2
 #define BUNDLE_ID_BYTES 32
@@ -60,11 +60,13 @@
 #define IDC_CANCEL_DOWNLOAD     1053
 
 #define UI_FOLDER_STATS_X       20
-#define UI_FOLDER_STATS_W       300
-#define UI_PROGRESS_X           330
-#define UI_PROGRESS_W           350
-#define UI_OVERALL_X            686
-#define UI_OVERALL_W            72
+#define UI_FOLDER_STATS_W       730
+#define UI_PROGRESS_LABEL_X     20
+#define UI_PROGRESS_LABEL_W     75
+#define UI_PROGRESS_X           100
+#define UI_PROGRESS_W           745
+#define UI_OVERALL_X            850
+#define UI_OVERALL_W            92
 #define UI_DOWNLOAD_X           765
 #define UI_DOWNLOAD_W           120
 #define UI_CANCEL_X             890
@@ -253,6 +255,8 @@ static volatile LONG g_opt_clean = 1;
 static volatile LONG g_opt_size = 1;
 static volatile LONG g_audio_bitrate = 320;
 static volatile LONG g_auto_update = 1;
+static BOOL g_download_batch_jobs[MAX_JOBS];
+static int g_download_batch_total = 0;
 
 static wchar_t g_app_dir[MAX_PATH];
 static wchar_t g_ytdlp[MAX_PATH];
@@ -1017,6 +1021,45 @@ static void SetControlText(HWND h, const wchar_t *text) {
     else SetWindowTextW(h, text ? text : L"");
 }
 
+static void UpdateOverallDownloadProgress(void) {
+    int total = 0;
+    int finished = 0;
+    int progress_units = 0;
+
+    EnterCriticalSection(&g_jobs_lock);
+    total = g_download_batch_total;
+    for (int i = 0; i < g_job_count; ++i) {
+        if (!g_download_batch_jobs[i]) continue;
+        JobStatus status = g_jobs[i].status;
+        if (status == JOB_DONE || status == JOB_FAILED || status == JOB_SKIPPED) {
+            finished++;
+            progress_units += 100;
+        } else if (status == JOB_DOWNLOADING) {
+            int progress = g_jobs[i].progress;
+            if (progress < 0) progress = 0;
+            if (progress > 99) progress = 99;
+            progress_units += progress;
+        }
+    }
+    LeaveCriticalSection(&g_jobs_lock);
+
+    int percent = total > 0 ? progress_units / total : 0;
+    if (percent > 100) percent = 100;
+    SendMessageW(g_progress, PBM_SETPOS, percent, 0);
+
+    wchar_t text[64];
+    StringCchPrintfW(text, 64, L"%d%%  |  %d / %d", percent, finished, total);
+    SetControlText(g_overall, text);
+}
+
+static void ResetOverallDownloadProgress(void) {
+    EnterCriticalSection(&g_jobs_lock);
+    ZeroMemory(g_download_batch_jobs, sizeof(g_download_batch_jobs));
+    g_download_batch_total = 0;
+    LeaveCriticalSection(&g_jobs_lock);
+    UpdateOverallDownloadProgress();
+}
+
 static void UpdateListRow(int index) {
     wchar_t raw_title[1024], clean_name[CLEAN_NAME_CCH];
     ULONGLONG expected_size;
@@ -1410,6 +1453,7 @@ static void CompactDuplicates(void) {
     if (out < g_job_count) ZeroMemory(&g_jobs[out], sizeof(Job) * (size_t)(g_job_count - out));
     g_job_count = out;
     LeaveCriticalSection(&g_jobs_lock);
+    ResetOverallDownloadProgress();
 }
 
 static unsigned __stdcall MetadataWorker(void *param) {
@@ -1534,6 +1578,7 @@ static void AddUrlsFromEdit(void) {
     LeaveCriticalSection(&g_jobs_lock);
     free(text);
     SetWindowTextW(g_url_edit, L"");
+    if (end > start) ResetOverallDownloadProgress();
     RebuildList();
     StartMetadataBatch(start, end);
 }
@@ -1656,6 +1701,7 @@ static void DeleteSelected(void) {
     }
     g_job_count = out;
     LeaveCriticalSection(&g_jobs_lock);
+    ResetOverallDownloadProgress();
     RebuildList();
     UpdatePreviewFromSelection();
 }
@@ -1983,13 +2029,22 @@ static unsigned __stdcall DownloadThread(void *param) {
     free(batch);
 
     EnterCriticalSection(&g_jobs_lock);
+    ZeroMemory(g_download_batch_jobs, sizeof(g_download_batch_jobs));
     for (int i = 0; i < g_job_count; ++i) {
         JobStatus s = g_jobs[i].status;
         BOOL pick = failed_only ? (s == JOB_FAILED) : (s == JOB_READY || s == JOB_FAILED || s == JOB_SKIPPED);
-        if (pick) work.indices[work.total++] = i;
+        if (pick) {
+            work.indices[work.total++] = i;
+            g_download_batch_jobs[i] = TRUE;
+            g_jobs[i].status = JOB_READY;
+            g_jobs[i].progress = 0;
+            g_jobs[i].error[0] = 0;
+        }
     }
+    g_download_batch_total = work.total;
     LeaveCriticalSection(&g_jobs_lock);
 
+    PostMessageW(g_main, WM_APP_REBUILD_LIST, 0, 0);
     PostMessageW(g_main, WM_APP_OVERALL, 0, work.total);
     HANDLE workers[DOWNLOAD_WORKER_COUNT - 1];
     DWORD worker_count = 0;
@@ -2069,7 +2124,7 @@ static void StartDownload(BOOL failed_only) {
     }
     ResetEvent(g_cancel_event);
     SetControlText(g_status, L"다운로드 준비 중...");
-    SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+    ResetOverallDownloadProgress();
     SetDownloadUiBusy(TRUE);
     Logger_Write(L"download", L"다운로드 배치를 시작했습니다.");
 
@@ -2310,7 +2365,7 @@ static void CreateUi(HWND hwnd) {
                          HANGEUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                          NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"굴림");
 
-    AddCtl(0, L"BUTTON", L"1. 유튜브 링크", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+    AddCtl(0, L"BUTTON", L"1. 미디어 링크", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
            8, 6, 944, 130, 0, hwnd);
     g_url_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
                         18, 25, 924, 70, IDC_URL_EDIT, hwnd);
@@ -2337,7 +2392,7 @@ static void CreateUi(HWND hwnd) {
                               825, 465, 117, 25, IDC_APPLY_FILENAME, hwnd);
 
     AddCtl(0, L"BUTTON", L"3. 저장 및 다운로드", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-           8, 501, 944, 112, 0, hwnd);
+           8, 501, 944, 145, 0, hwnd);
     AddCtl(0, L"STATIC", L"저장 폴더:", WS_CHILD | WS_VISIBLE,
            20, 523, 68, 20, 0, hwnd);
     g_folder_edit = AddCtl(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -2347,11 +2402,13 @@ static void CreateUi(HWND hwnd) {
     g_folder_stats = AddCtl(0, L"STATIC", L"현재 폴더: 0곡  |  총 용량: -", WS_CHILD | WS_VISIBLE,
                             UI_FOLDER_STATS_X, 555, UI_FOLDER_STATS_W, 22,
                             IDC_FOLDER_STATS, hwnd);
+    AddCtl(0, L"STATIC", L"전체 진행:", WS_CHILD | WS_VISIBLE,
+           UI_PROGRESS_LABEL_X, 603, UI_PROGRESS_LABEL_W, 22, 0, hwnd);
     g_progress = AddCtl(WS_EX_CLIENTEDGE, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
-                        UI_PROGRESS_X, 554, UI_PROGRESS_W, 20, IDC_PROGRESS, hwnd);
+                        UI_PROGRESS_X, 601, UI_PROGRESS_W, 22, IDC_PROGRESS, hwnd);
     SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-    g_overall = AddCtl(0, L"STATIC", L"0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
-                       UI_OVERALL_X, 554, UI_OVERALL_W, 22, IDC_OVERALL, hwnd);
+    g_overall = AddCtl(0, L"STATIC", L"0%  |  0 / 0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                       UI_OVERALL_X, 601, UI_OVERALL_W, 22, IDC_OVERALL, hwnd);
     g_download_button = AddCtl(0, L"BUTTON", L"전체 다운로드", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                UI_DOWNLOAD_X, 546, UI_DOWNLOAD_W, 34,
                                IDC_DOWNLOAD_ALL, hwnd);
@@ -2374,6 +2431,7 @@ static void ClearJobs(void) {
     ZeroMemory(g_jobs, sizeof(g_jobs));
     g_job_count = 0;
     LeaveCriticalSection(&g_jobs_lock);
+    ResetOverallDownloadProgress();
     RebuildList();
     UpdatePreviewFromSelection();
 }
@@ -2599,7 +2657,6 @@ static void StartUpdateInstall(const wchar_t *version) {
     }
     StringCchCopyW(result->latest, 32, version);
     EnableWindow(g_main, FALSE);
-    SendMessageW(g_progress, PBM_SETPOS, 0, 0);
     SetControlText(g_status, L"상태: 업데이트 다운로드 중... 0%");
     uintptr_t thread = _beginthreadex(NULL, 0, UpdateInstallThread, result, 0, NULL);
     if (thread) {
@@ -3210,6 +3267,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_APP_JOB_UPDATED:
             UpdateListRow((int)wParam);
+            UpdateOverallDownloadProgress();
             if (ListView_GetNextItem(g_list, -1, LVNI_SELECTED) == (int)wParam) {
                 UpdatePreviewFromSelection();
             }
@@ -3236,12 +3294,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_APP_OVERALL: {
-            wchar_t text[128];
-            int done = (int)wParam;
-            int total = (int)lParam;
-            StringCchPrintfW(text, 128, L"%d / %d", done, total);
-            SetControlText(g_overall, text);
-            SendMessageW(g_progress, PBM_SETPOS, total > 0 ? done * 100 / total : 0, 0);
+            (void)wParam;
+            (void)lParam;
+            UpdateOverallDownloadProgress();
             return 0;
         }
 
@@ -3261,7 +3316,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 cancelled ? L"상태: 작업 취소됨 (완료 %d, 건너뜀 %d, 실패 %d)" :
                             L"상태: 작업 완료 (완료 %d, 건너뜀 %d, 실패 %d)",
                 done, skipped, failed);
-            SendMessageW(g_progress, PBM_SETPOS, wParam ? 100 : 0, 0);
+            UpdateOverallDownloadProgress();
             SetControlText(g_status, text);
             SetDownloadUiBusy(FALSE);
             UpdateFolderStatsUI();
@@ -3317,7 +3372,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (percent > 100) percent = 100;
             wchar_t text[96];
             StringCchPrintfW(text, 96, L"상태: 업데이트 다운로드 중... %d%%", percent);
-            SendMessageW(g_progress, PBM_SETPOS, percent, 0);
             SetControlText(g_status, text);
             return 0;
         }
@@ -3340,7 +3394,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 DeleteFileW(install->downloaded_path);
             }
-            SendMessageW(g_progress, PBM_SETPOS, 0, 0);
             SetControlText(g_status, L"상태: 업데이트에 실패했습니다.");
             MessageBoxW(hwnd,
                 install && install->error[0] ? install->error :
@@ -3498,14 +3551,15 @@ static BOOL RunCoreSelfTests(void) {
         DownloadWorkerLimitFor(8) != DOWNLOAD_WORKER_COUNT) return FALSE;
 
     if (BaseUiRectsOverlap(UI_FOLDER_STATS_X, UI_FOLDER_STATS_W,
+                           UI_DOWNLOAD_X, UI_DOWNLOAD_W) ||
+        BaseUiRectsOverlap(UI_PROGRESS_LABEL_X, UI_PROGRESS_LABEL_W,
                            UI_PROGRESS_X, UI_PROGRESS_W) ||
         BaseUiRectsOverlap(UI_PROGRESS_X, UI_PROGRESS_W,
                            UI_OVERALL_X, UI_OVERALL_W) ||
-        BaseUiRectsOverlap(UI_OVERALL_X, UI_OVERALL_W,
-                           UI_DOWNLOAD_X, UI_DOWNLOAD_W) ||
         BaseUiRectsOverlap(UI_DOWNLOAD_X, UI_DOWNLOAD_W,
                            UI_CANCEL_X, UI_CANCEL_W) ||
-        UI_CANCEL_X + UI_CANCEL_W > APP_CLIENT_W) return FALSE;
+        UI_CANCEL_X + UI_CANCEL_W > APP_CLIENT_W ||
+        UI_OVERALL_X + UI_OVERALL_W > APP_CLIENT_W) return FALSE;
 
     wchar_t cleaned[256];
     Filename_BuildClean(L"가수 - 노래 (공식 뮤비)", L"", L"", TRUE, TRUE, cleaned, 256);
