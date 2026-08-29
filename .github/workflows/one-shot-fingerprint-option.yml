@@ -94,14 +94,10 @@ jobs:
           '@
 
           Replace-Once 'src/main.c' @'
-                  case IDM_OPT_DEDUP:
-                  case IDM_OPT_SKIP:
-                  case IDM_OPT_SANITIZE:
+                  case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
           '@ @'
-                  case IDM_OPT_DEDUP:
-                  case IDM_OPT_SKIP:
-                  case IDM_OPT_FINGERPRINT:
-                  case IDM_OPT_SANITIZE:
+                  case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+                  case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
           '@
 
           Replace-Once 'src/history.c' @'
