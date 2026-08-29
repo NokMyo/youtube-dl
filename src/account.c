@@ -324,7 +324,7 @@ static BOOL PerformLogin(HWND owner, const wchar_t *username, const wchar_t *pas
         return FALSE;
     }
     SecureZeroMemory(token, sizeof(token));
-    MessageBoxW(owner, L"Febius 계정에 로그인했습니다.\nDownrush 사용 권한이 확인되었습니다.",
+    MessageBoxW(owner, L"Febius 계정에 로그인했습니다.\n라이선스가 확인되었습니다.",
                 L"Febius 계정", MB_OK | MB_ICONINFORMATION);
     return TRUE;
 }
