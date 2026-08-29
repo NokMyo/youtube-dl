@@ -95,6 +95,18 @@ static BOOL Fingerprint_GetPath(const wchar_t *folder, wchar_t *out, size_t cch)
            SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\audio_fingerprints.txt", folder));
 }
 
+static BOOL FingerprintDedupEnabled(void) {
+    HKEY key = NULL;
+    DWORD value = 1, type = 0, size = sizeof(value);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NokMyo\\Febius\\Downrush",
+                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return TRUE;
+    LONG status = RegQueryValueExW(key, L"FingerprintDedup", NULL, &type,
+                                   (BYTE *)&value, &size);
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS) return TRUE;
+    return type == REG_DWORD && size == sizeof(value) && value != 0;
+}
+
 static BOOL FindFpcalc(wchar_t *out, size_t cch) {
     wchar_t local[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, local))) {
@@ -305,7 +317,8 @@ BOOL History_Record(const wchar_t *folder,
     wchar_t audio_path[MAX_PATH];
     char fingerprint[FINGERPRINT_CCH];
     fingerprint[0] = 0;
-    if (SUCCEEDED(StringCchPrintfW(audio_path, MAX_PATH, L"%s\\%s", folder, actual_filename)) &&
+    if (FingerprintDedupEnabled() &&
+        SUCCEEDED(StringCchPrintfW(audio_path, MAX_PATH, L"%s\\%s", folder, actual_filename)) &&
         FileExists(audio_path) && CalculateFingerprint(audio_path, fingerprint, sizeof(fingerprint))) {
         wchar_t matched[HISTORY_FILENAME_CCH];
         if (FindFingerprintMatchUnlocked(folder, fingerprint, matched, HISTORY_FILENAME_CCH) &&

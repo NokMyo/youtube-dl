@@ -106,6 +106,7 @@
 #define IDM_OPT_CLEAN           2043
 #define IDM_OPT_SIZE            2044
 #define IDM_OPT_AUTO_UPDATE     2045
+#define IDM_OPT_FINGERPRINT     2046
 #define IDM_QUALITY_128         2050
 #define IDM_QUALITY_192         2051
 #define IDM_QUALITY_256         2052
@@ -253,6 +254,7 @@ static volatile LONG g_opt_skip = 1;
 static volatile LONG g_opt_sanitize = 1;
 static volatile LONG g_opt_clean = 1;
 static volatile LONG g_opt_size = 1;
+static volatile LONG g_opt_fingerprint = 1;
 static volatile LONG g_audio_bitrate = 320;
 static volatile LONG g_auto_update = 1;
 static BOOL g_download_batch_jobs[MAX_JOBS];
@@ -425,6 +427,7 @@ static void LoadSettings(void) {
         { L"SanitizeFilenames", &g_opt_sanitize },
         { L"CleanNames", &g_opt_clean },
         { L"ShowEstimatedSize", &g_opt_size },
+        { L"FingerprintDedup", &g_opt_fingerprint },
         { L"CheckUpdatesAtStartup", &g_auto_update }
     };
     for (size_t i = 0; i < sizeof(boolean_settings) / sizeof(boolean_settings[0]); ++i) {
@@ -1200,7 +1203,7 @@ static void SetDownloadUiBusy(BOOL busy) {
         IDM_FILE_LOAD_TXT, IDM_FILE_BROWSE_FOLDER, IDM_JOB_ADD_LINKS,
         IDM_JOB_REMOVE_DUP, IDM_JOB_DOWNLOAD_ALL, IDM_JOB_RETRY_FAILED,
         IDM_JOB_CLEAR, IDM_JOB_DELETE_SELECTED, IDM_OPT_DEDUP, IDM_OPT_SKIP,
-        IDM_OPT_SANITIZE, IDM_OPT_CLEAN, IDM_OPT_SIZE,
+        IDM_OPT_FINGERPRINT, IDM_OPT_SANITIZE, IDM_OPT_CLEAN, IDM_OPT_SIZE,
         IDM_QUALITY_128, IDM_QUALITY_192, IDM_QUALITY_256, IDM_QUALITY_320,
         IDM_TOOLS_OPEN_HISTORY
     };
@@ -2231,6 +2234,7 @@ static void SyncOptionMenuChecks(void) {
         { IDM_OPT_SANITIZE, &g_opt_sanitize },
         { IDM_OPT_CLEAN, &g_opt_clean },
         { IDM_OPT_SIZE, &g_opt_size },
+        { IDM_OPT_FINGERPRINT, &g_opt_fingerprint },
         { IDM_OPT_AUTO_UPDATE, &g_auto_update }
     };
     for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); ++i) {
@@ -2285,6 +2289,8 @@ static void ToggleBooleanOption(int id) {
     switch (id) {
         case IDM_OPT_DEDUP: target = &g_opt_dedup; setting_name = L"RemoveDuplicates"; break;
         case IDM_OPT_SKIP: target = &g_opt_skip; setting_name = L"SkipDownloaded"; break;
+        case IDM_OPT_FINGERPRINT:
+            target = &g_opt_fingerprint; setting_name = L"FingerprintDedup"; break;
         case IDM_OPT_SANITIZE:
             target = &g_opt_sanitize; setting_name = L"SanitizeFilenames"; rebuild_names = TRUE; break;
         case IDM_OPT_CLEAN:
@@ -2337,6 +2343,7 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(g_options_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_DEDUP, L"중복 링크 자동 제거");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SKIP, L"이미 다운로드한 곡 건너뛰기");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_FINGERPRINT, L"동일 녹음 음원 지문 중복 검사");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SANITIZE, L"파일명 금지 문자 자동 제거");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_CLEAN, L"이름 자동 정리");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SIZE, L"예상 파일 용량 표시");
@@ -3240,6 +3247,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+        case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
                 case IDM_OPT_DEDUP:
                 case IDM_OPT_SKIP:
                 case IDM_OPT_SANITIZE:
