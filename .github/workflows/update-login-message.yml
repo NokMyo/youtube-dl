@@ -1,0 +1,33 @@
+name: Update login success message
+
+on:
+  push:
+    paths:
+      - '.github/workflows/update-login-message.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update message
+        shell: pwsh
+        run: |
+          $path = 'src/account.c'
+          $text = [IO.File]::ReadAllText($path)
+          $old = 'Febius 계정에 로그인했습니다.\nDownrush 사용 권한이 확인되었습니다.'
+          $new = 'Febius 계정에 로그인했습니다.\n라이선스가 확인되었습니다.'
+          if (-not $text.Contains($old)) { throw 'Target login message not found.' }
+          $text = $text.Replace($old, $new)
+          [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+      - name: Commit
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/account.c
+          git commit -m 'Refine account login success message'
+          git push
