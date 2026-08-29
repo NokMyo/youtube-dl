@@ -21,6 +21,7 @@ configure_file(src/version.h.in generated/version.h @ONLY)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(FebiusDownrush WIN32
+    src/account.c
     src/app.rc
     src/command_line.c
     src/filename.c
@@ -77,4 +78,5 @@ target_link_libraries(FebiusDownrush PRIVATE
     uxtheme
     winhttp
     advapi32
+    crypt32
 )
