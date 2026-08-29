@@ -1,6 +1,6 @@
 # Febius Downrush
 
-Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그램입니다. C와 Win32 API로 구현했으며 공식 릴리스는 `yt-dlp`, Deno, FFmpeg, ffprobe를 포함한 단일 EXE로 배포합니다.
+Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그램입니다. C와 Win32 API로 구현했으며 공식 릴리스는 `yt-dlp`, Deno, FFmpeg, ffprobe, Chromaprint `fpcalc`를 포함한 단일 EXE로 배포합니다.
 
 본인이 소유했거나 다운로드 허가를 받은 콘텐츠에만 사용하세요.
 
@@ -21,6 +21,7 @@ Febius Utility Series의 Windows용 미디어 MP3 일괄 다운로드 프로그�
 - CPU 수에 따른 동시 작업량 자동 조절
 - SHA-256 검증 기반 자동 업데이트 및 재시작
 - 설정 저장, 순환 진단 로그, 단일 인스턴스 실행
+- 향후 음원 지문 기반 중복 판별을 위한 Chromaprint `fpcalc` 내장
 
 ## 저장 경로
 
