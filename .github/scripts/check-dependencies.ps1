@@ -13,7 +13,8 @@ $dependencies = @(
   @{ Name = 'yt-dlp'; Variable = 'ytDlpVersion'; Repository = 'yt-dlp/yt-dlp'; Prefix = '' },
   @{ Name = 'yt-dlp-ejs'; Variable = 'ejsVersion'; Repository = 'yt-dlp/ejs'; Prefix = '' },
   @{ Name = 'Deno'; Variable = 'denoVersion'; Repository = 'denoland/deno'; Prefix = 'v' },
-  @{ Name = 'FFmpeg Gyan'; Variable = 'ffmpegVersion'; Repository = 'GyanD/codexffmpeg'; Prefix = '' }
+  @{ Name = 'FFmpeg Gyan'; Variable = 'ffmpegVersion'; Repository = 'GyanD/codexffmpeg'; Prefix = '' },
+  @{ Name = 'Chromaprint'; Variable = 'chromaprintVersion'; Repository = 'acoustid/chromaprint'; Prefix = 'v' }
 )
 
 $outdated = @()
