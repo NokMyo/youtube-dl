@@ -250,6 +250,7 @@ static BOOL HttpRequest(const wchar_t *method,
     }
 
     size_t used = 0;
+    BOOL truncated = FALSE;
     while (ok && used + 1 < response_size) {
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request, &available)) {
@@ -266,9 +267,13 @@ static BOOL HttpRequest(const wchar_t *method,
         }
         used += read;
         if (read < to_read) break;
-        if (to_read < available) break;
+        if (to_read < available) {
+            truncated = TRUE;
+            break;
+        }
     }
     response[used] = 0;
+    if (truncated) ok = FALSE;
 
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connect);
@@ -294,7 +299,7 @@ static BOOL PerformLogin(HWND owner, const wchar_t *username, const wchar_t *pas
     if (!JsonEscapeWide(username, username_json, sizeof(username_json)) ||
         !JsonEscapeWide(password, password_json, sizeof(password_json)) ||
         FAILED(StringCchPrintfA(body, sizeof(body),
-            "{\"username\":\"%s\",\"password\":\"%s\",\"client_name\":\"Febius Downrush for Windows\"}",
+            "{\"username\":\"%s\",\"password\":\"%s\",\"product_code\":\"downrush\",\"client_name\":\"Febius Downrush for Windows\"}",
             username_json, password_json))) {
         MessageBoxW(owner, L"로그인 정보를 처리하지 못했습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
         SecureZeroMemory(password_json, sizeof(password_json));
@@ -440,6 +445,8 @@ void Account_ShowLogin(HWND owner) {
 
 typedef struct AccountInfoWindowState {
     wchar_t username[128];
+    wchar_t plan[64];
+    wchar_t license[64];
 } AccountInfoWindowState;
 
 static LRESULT CALLBACK AccountInfoWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -459,7 +466,12 @@ static LRESULT CALLBACK AccountInfoWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
                           24, 78, 352, 2, hwnd, NULL, NULL, NULL);
             const wchar_t *labels[] = { L"계정", L"제품", L"플랜", L"라이선스" };
-            const wchar_t *values[] = { state ? state->username : L"-", L"Febius Downrush", L"Standard", L"확인됨" };
+            const wchar_t *values[] = {
+                state ? state->username : L"-",
+                L"Febius Downrush",
+                state ? state->plan : L"-",
+                state ? state->license : L"-"
+            };
             for (int i = 0; i < 4; ++i) {
                 HWND label = CreateWindowW(L"STATIC", labels[i], WS_CHILD | WS_VISIBLE,
                                            26, 102 + i * 36, 82, 22, hwnd, NULL, NULL, NULL);
@@ -488,7 +500,8 @@ static LRESULT CALLBACK AccountInfoWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-static void ShowAccountInfoWindow(HWND owner, const wchar_t *username) {
+static void ShowAccountInfoWindow(HWND owner, const wchar_t *username,
+                                  const wchar_t *plan, const wchar_t *license) {
     static ATOM atom = 0;
     if (!atom) {
         WNDCLASSW wc;
@@ -504,6 +517,8 @@ static void ShowAccountInfoWindow(HWND owner, const wchar_t *username) {
     AccountInfoWindowState state;
     ZeroMemory(&state, sizeof(state));
     StringCchCopyW(state.username, 128, username && *username ? username : L"알 수 없음");
+    StringCchCopyW(state.plan, 64, plan && *plan ? plan : L"알 수 없음");
+    StringCchCopyW(state.license, 64, license && *license ? license : L"확인되지 않음");
     RECT owner_rect = {0};
     GetWindowRect(owner, &owner_rect);
     int width = 420, height = 340;
@@ -553,13 +568,18 @@ void Account_ShowStatus(HWND owner) {
         return;
     }
 
-    char username_utf8[128];
-    wchar_t username[128];
+    char username_utf8[128], plan_utf8[64];
+    wchar_t username[128], plan[64];
     if (!ExtractJsonString(response, "username", username_utf8, sizeof(username_utf8)) ||
         !WideFromUtf8(username_utf8, username, sizeof(username) / sizeof(username[0]))) {
         StringCchCopyW(username, 128, L"알 수 없음");
     }
-    ShowAccountInfoWindow(owner, username);
+    const char *plan_object = strstr(response, "\"plan\":{");
+    if (!plan_object || !ExtractJsonString(plan_object, "name", plan_utf8, sizeof(plan_utf8)) ||
+        !WideFromUtf8(plan_utf8, plan, sizeof(plan) / sizeof(plan[0]))) {
+        StringCchCopyW(plan, 64, L"알 수 없음");
+    }
+    ShowAccountInfoWindow(owner, username, plan, L"사용 가능");
 }
 
 void Account_Logout(HWND owner) {
@@ -596,54 +616,105 @@ static BOOL ExtractJsonInt64(const char *json, const char *key, LONGLONG *value)
     return TRUE;
 }
 
+static BOOL ExtractJsonBool(const char *json, const char *key, BOOL *value) {
+    if (!json || !key || !value) return FALSE;
+    char needle[128];
+    if (FAILED(StringCchPrintfA(needle, sizeof(needle), "\"%s\":", key))) return FALSE;
+    const char *p = strstr(json, needle);
+    if (!p) return FALSE;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') ++p;
+    if (!strncmp(p, "true", 4)) { *value = TRUE; return TRUE; }
+    if (!strncmp(p, "false", 5)) { *value = FALSE; return TRUE; }
+    return FALSE;
+}
+
 void Account_FreeSyncResult(AccountSyncResult *result) {
     if (!result) return;
-    free(result->links_text);
+    if (result->links_text) {
+        SecureZeroMemory(result->links_text, (wcslen(result->links_text) + 1) * sizeof(wchar_t));
+        free(result->links_text);
+    }
+    SecureZeroMemory(result, sizeof(*result));
     free(result);
+}
+
+static void SetSyncError(AccountSyncResult *result, const wchar_t *message) {
+    if (!result) return;
+    StringCchCopyW(result->error, 256, message ? message : L"저장된 링크를 가져오지 못했습니다.");
 }
 
 static unsigned __stdcall AccountSyncWorker(void *param) {
     AccountSyncWork *work = (AccountSyncWork *)param;
+    AccountSyncResult *result = (AccountSyncResult *)calloc(1, sizeof(*result));
     char token[ACCOUNT_TOKEN_MAX];
-    if (!work || !LoadToken(token, sizeof(token))) {
+    token[0] = 0;
+
+    if (!work || !result) {
+        free(result);
         free(work);
         InterlockedExchange((LONG *)&g_account_sync_running, 0);
         return 0;
     }
-    DWORD status = 0;
-    char *response = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
-    BOOL ok = response && HttpRequest(L"GET", L"/api/app/sync", NULL, token,
-                                      &status, response, ACCOUNT_RESPONSE_MAX);
-    SecureZeroMemory(token, sizeof(token));
-    if (!ok || status != 200) {
-        if (status == 401 || status == 403) ClearToken();
-        free(response); free(work);
-        InterlockedExchange((LONG *)&g_account_sync_running, 0);
-        return 0;
-    }
-    char *links_utf8 = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
-    LONGLONG max_id = 0;
-    AccountSyncResult *result = NULL;
-    if (links_utf8 && ExtractJsonString(response, "links_text", links_utf8, ACCOUNT_RESPONSE_MAX) &&
-        ExtractJsonInt64(response, "max_id", &max_id)) {
-        int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, links_utf8, -1, NULL, 0);
-        if (chars > 0) {
-            result = (AccountSyncResult *)calloc(1, sizeof(*result));
-            if (result) {
-                result->links_text = (wchar_t *)calloc((size_t)chars, sizeof(wchar_t));
-                if (!result->links_text || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                        links_utf8, -1, result->links_text, chars)) {
-                    Account_FreeSyncResult(result); result = NULL;
-                } else result->max_link_id = max_id;
+
+    if (!LoadToken(token, sizeof(token))) {
+        SetSyncError(result, L"Febius 계정에 다시 로그인해 주세요.");
+    } else {
+        DWORD status = 0;
+        char *response = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
+        BOOL request_ok = response && HttpRequest(L"GET", L"/api/app/sync", NULL, token,
+                                                  &status, response, ACCOUNT_RESPONSE_MAX);
+        SecureZeroMemory(token, sizeof(token));
+
+        if (!request_ok) {
+            SetSyncError(result, L"Febius 계정 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.");
+        } else if (status != 200) {
+            if (status == 401 || status == 403) ClearToken();
+            char error_utf8[512];
+            if (ExtractJsonString(response, "error", error_utf8, sizeof(error_utf8)) &&
+                WideFromUtf8(error_utf8, result->error, 256)) {
+                SecureZeroMemory(error_utf8, sizeof(error_utf8));
+            } else {
+                SetSyncError(result, L"저장된 링크를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+            }
+        } else {
+            char *links_utf8 = (char *)calloc(ACCOUNT_RESPONSE_MAX, 1);
+            LONGLONG max_id = 0;
+            BOOL has_more = FALSE;
+            if (links_utf8 &&
+                ExtractJsonString(response, "links_text", links_utf8, ACCOUNT_RESPONSE_MAX) &&
+                ExtractJsonInt64(response, "max_id", &max_id) &&
+                ExtractJsonBool(response, "has_more", &has_more)) {
+                int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, links_utf8, -1, NULL, 0);
+                if (chars > 0) {
+                    result->links_text = (wchar_t *)calloc((size_t)chars, sizeof(wchar_t));
+                    if (result->links_text && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                            links_utf8, -1, result->links_text, chars)) {
+                        result->max_link_id = max_id;
+                        result->has_more = has_more;
+                        result->ok = TRUE;
+                    }
+                }
+            }
+            if (!result->ok) SetSyncError(result, L"계정 서버의 링크 정보를 읽지 못했습니다.");
+            if (links_utf8) {
+                SecureZeroMemory(links_utf8, ACCOUNT_RESPONSE_MAX);
+                free(links_utf8);
             }
         }
+        if (response) {
+            SecureZeroMemory(response, ACCOUNT_RESPONSE_MAX);
+            free(response);
+        }
     }
-    if (links_utf8) { SecureZeroMemory(links_utf8, ACCOUNT_RESPONSE_MAX); free(links_utf8); }
-    free(response);
-    HWND target = work->target; UINT message = work->message; free(work);
+
+    HWND target = work->target;
+    UINT message = work->message;
+    free(work);
     InterlockedExchange((LONG *)&g_account_sync_running, 0);
-    if (result && (!IsWindow(target) || !PostMessageW(target, message, 0, (LPARAM)result)))
+    if (!IsWindow(target) || !PostMessageW(target, message, 0, (LPARAM)result)) {
         Account_FreeSyncResult(result);
+    }
     return 0;
 }
 
@@ -652,9 +723,14 @@ BOOL Account_RequestSync(HWND target, UINT message) {
     if (InterlockedCompareExchange((LONG *)&g_account_sync_running, 1, 0) != 0) return FALSE;
     AccountSyncWork *work = (AccountSyncWork *)calloc(1, sizeof(*work));
     if (!work) { InterlockedExchange((LONG *)&g_account_sync_running, 0); return FALSE; }
-    work->target = target; work->message = message;
+    work->target = target;
+    work->message = message;
     uintptr_t thread = _beginthreadex(NULL, 0, AccountSyncWorker, work, 0, NULL);
-    if (!thread) { free(work); InterlockedExchange((LONG *)&g_account_sync_running, 0); return FALSE; }
+    if (!thread) {
+        free(work);
+        InterlockedExchange((LONG *)&g_account_sync_running, 0);
+        return FALSE;
+    }
     CloseHandle((HANDLE)thread);
     return TRUE;
 }
@@ -663,15 +739,19 @@ static unsigned __stdcall AccountAckWorker(void *param) {
     AccountAckWork *work = (AccountAckWork *)param;
     char token[ACCOUNT_TOKEN_MAX];
     if (work && LoadToken(token, sizeof(token))) {
-        char body[128]; DWORD status = 0; char response[2048];
+        char body[128];
+        DWORD status = 0;
+        char response[2048];
         if (SUCCEEDED(StringCchPrintfA(body, sizeof(body), "{\"last_link_id\":%lld}",
                                       (long long)work->last_link_id))) {
             HttpRequest(L"POST", L"/api/app/sync", body, token, &status, response, sizeof(response));
             if (status == 401 || status == 403) ClearToken();
         }
+        SecureZeroMemory(response, sizeof(response));
         SecureZeroMemory(token, sizeof(token));
     }
-    free(work); return 0;
+    free(work);
+    return 0;
 }
 
 void Account_AcknowledgeSyncAsync(LONGLONG last_link_id) {
@@ -680,5 +760,6 @@ void Account_AcknowledgeSyncAsync(LONGLONG last_link_id) {
     if (!work) return;
     work->last_link_id = last_link_id;
     uintptr_t thread = _beginthreadex(NULL, 0, AccountAckWorker, work, 0, NULL);
-    if (thread) CloseHandle((HANDLE)thread); else free(work);
+    if (thread) CloseHandle((HANDLE)thread);
+    else free(work);
 }
