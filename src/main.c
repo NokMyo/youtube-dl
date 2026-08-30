@@ -3382,6 +3382,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_ACCOUNT_SYNC: {
             AccountSyncResult *sync = (AccountSyncResult *)lParam;
             if (!sync) return 0;
+            if (!sync->ok) {
+                const wchar_t *message = sync->error[0]
+                    ? sync->error
+                    : L"저장된 링크를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.";
+                SetControlText(g_status, L"상태: 저장된 링크 가져오기 실패");
+                MessageBoxW(hwnd, message, L"저장된 링크 가져오기", MB_OK | MB_ICONWARNING);
+                RefreshAccountMenu();
+                Account_FreeSyncResult(sync);
+                return 0;
+            }
+
             BOOL idle = !InterlockedCompareExchange((LONG *)&g_meta_running, 0, 0) &&
                         !InterlockedCompareExchange((LONG *)&g_download_running, 0, 0) &&
                         !InterlockedCompareExchange((LONG *)&g_tools_loading, 0, 0);
@@ -3390,12 +3401,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetWindowTextW(g_url_edit, sync->links_text);
                 AddUrlsFromEdit();
                 Account_AcknowledgeSyncAsync(sync->max_link_id);
-                SetControlText(g_status, L"상태: 저장된 링크를 불러왔습니다.");
+                SetControlText(g_status, sync->has_more
+                    ? L"상태: 저장된 링크 일부를 불러왔습니다. 남은 링크는 다시 가져올 수 있습니다."
+                    : L"상태: 저장된 링크를 불러왔습니다.");
             } else if (!sync->links_text || !sync->links_text[0]) {
                 SetControlText(g_status, L"상태: 새로 가져올 저장된 링크가 없습니다.");
                 MessageBoxW(hwnd, L"새로 가져올 저장된 링크가 없습니다.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
             } else {
                 SetControlText(g_status, L"상태: 지금은 저장된 링크를 가져올 수 없습니다.");
+                MessageBoxW(hwnd, L"현재 작업이 끝난 뒤 다시 가져와 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
             }
             Account_FreeSyncResult(sync);
             return 0;
