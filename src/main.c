@@ -2348,7 +2348,7 @@ static HMENU CreateAppMenu(void) {
     AppendMenuW(g_options_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_DEDUP, L"중복 링크 자동 제거");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SKIP, L"이미 다운로드한 곡 건너뛰기");
-    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_FINGERPRINT, L"동일 녹음 음원 지문 중복 검사");
+    AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_FINGERPRINT, L"동일 녹음 음원 지문 중복 검사 (고사양)");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SANITIZE, L"파일명 금지 문자 자동 제거");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_CLEAN, L"이름 자동 정리");
     AppendMenuW(g_options_menu, MF_STRING, IDM_OPT_SIZE, L"예상 파일 용량 표시");
