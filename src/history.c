@@ -97,13 +97,13 @@ static BOOL Fingerprint_GetPath(const wchar_t *folder, wchar_t *out, size_t cch)
 
 static BOOL FingerprintDedupEnabled(void) {
     HKEY key = NULL;
-    DWORD value = 1, type = 0, size = sizeof(value);
+    DWORD value = 0, type = 0, size = sizeof(value);
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NokMyo\\Febius\\Downrush",
-                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return TRUE;
+                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return FALSE;
     LONG status = RegQueryValueExW(key, L"FingerprintDedup", NULL, &type,
                                    (BYTE *)&value, &size);
     RegCloseKey(key);
-    if (status != ERROR_SUCCESS) return TRUE;
+    if (status != ERROR_SUCCESS) return FALSE;
     return type == REG_DWORD && size == sizeof(value) && value != 0;
 }
 
@@ -308,18 +308,22 @@ BOOL History_Record(const wchar_t *folder,
                     const wchar_t *actual_filename,
                     int bitrate) {
     if (!folder || !*folder || !video_id || !*video_id || !actual_filename || !*actual_filename ||
-        !IsSupportedBitrate(bitrate) || !Filename_IsSafe(video_id) || !Filename_IsSafe(actual_filename)) return FALSE;
+        !IsSupportedBitrate(bitrate) || !Filename_IsSafe(actual_filename)) return FALSE;
     History_EnsureLoaded(folder);
-    EnterCriticalSection(&g_history_lock);
 
-    wchar_t record_filename[HISTORY_FILENAME_CCH];
-    StringCchCopyW(record_filename, HISTORY_FILENAME_CCH, actual_filename);
     wchar_t audio_path[MAX_PATH];
     char fingerprint[FINGERPRINT_CCH];
     fingerprint[0] = 0;
     if (FingerprintDedupEnabled() &&
         SUCCEEDED(StringCchPrintfW(audio_path, MAX_PATH, L"%s\\%s", folder, actual_filename)) &&
-        FileExists(audio_path) && CalculateFingerprint(audio_path, fingerprint, sizeof(fingerprint))) {
+        FileExists(audio_path)) {
+        CalculateFingerprint(audio_path, fingerprint, sizeof(fingerprint));
+    }
+
+    EnterCriticalSection(&g_history_lock);
+    wchar_t record_filename[HISTORY_FILENAME_CCH];
+    StringCchCopyW(record_filename, HISTORY_FILENAME_CCH, actual_filename);
+    if (fingerprint[0]) {
         wchar_t matched[HISTORY_FILENAME_CCH];
         if (FindFingerprintMatchUnlocked(folder, fingerprint, matched, HISTORY_FILENAME_CCH) &&
             _wcsicmp(matched, actual_filename)) {
