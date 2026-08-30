@@ -648,16 +648,39 @@ void Account_ShowStatus(HWND owner) {
     ShowAccountInfoWindow(owner, username, plan, L"사용 가능");
 }
 
-void Account_Logout(HWND owner) {
+typedef struct LogoutWork {
     char token[ACCOUNT_TOKEN_MAX];
-    if (LoadToken(token, sizeof(token))) {
+} LogoutWork;
+
+static unsigned __stdcall LogoutWorker(void *param) {
+    LogoutWork *work = (LogoutWork *)param;
+    if (work) {
         DWORD status = 0;
         char response[2048];
-        HttpRequest(L"POST", L"/api/app/logout", "{}", token,
+        HttpRequest(L"POST", L"/api/app/logout", "{}", work->token,
                     &status, response, sizeof(response));
-        SecureZeroMemory(token, sizeof(token));
+        SecureZeroMemory(response, sizeof(response));
+        SecureZeroMemory(work, sizeof(*work));
+        free(work);
     }
+    return 0;
+}
+
+void Account_Logout(HWND owner) {
+    LogoutWork *work = (LogoutWork *)calloc(1, sizeof(*work));
+    BOOL have_token = work && LoadToken(work->token, sizeof(work->token));
     ClearToken();
+
+    if (have_token) {
+        uintptr_t thread = _beginthreadex(NULL, 0, LogoutWorker, work, 0, NULL);
+        if (thread) CloseHandle((HANDLE)thread);
+        else {
+            SecureZeroMemory(work, sizeof(*work));
+            free(work);
+        }
+    } else {
+        free(work);
+    }
     MessageBoxW(owner, L"Febius 계정에서 로그아웃했습니다.", L"Febius 계정", MB_OK | MB_ICONINFORMATION);
 }
 
