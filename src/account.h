@@ -9,8 +9,11 @@ BOOL Account_HasSavedSession(void);
 
 
 typedef struct AccountSyncResult {
+    BOOL ok;
+    BOOL has_more;
     LONGLONG max_link_id;
     wchar_t *links_text;
+    wchar_t error[256];
 } AccountSyncResult;
 
 BOOL Account_RequestSync(HWND target, UINT message);
