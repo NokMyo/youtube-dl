@@ -608,30 +608,39 @@ static void ShowAccountInfoWindow(HWND owner, const wchar_t *username,
     SetForegroundWindow(owner);
 }
 
-void Account_ShowStatus(HWND owner) {
+typedef struct AccountStatusWork {
+    HWND owner;
     char token[ACCOUNT_TOKEN_MAX];
-    if (!LoadToken(token, sizeof(token))) {
-        MessageBoxW(owner, L"현재 로그인된 Febius 계정이 없습니다.", L"Febius 계정", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+} AccountStatusWork;
+
+static unsigned __stdcall AccountStatusWorker(void *param) {
+    AccountStatusWork *work = (AccountStatusWork *)param;
+    if (!work) return 0;
 
     DWORD status = 0;
     char response[ACCOUNT_RESPONSE_MAX];
-    BOOL ok = HttpRequest(L"GET", L"/api/app/me", NULL, token,
+    BOOL ok = HttpRequest(L"GET", L"/api/app/me", NULL, work->token,
                           &status, response, sizeof(response));
-    SecureZeroMemory(token, sizeof(token));
+    SecureZeroMemory(work->token, sizeof(work->token));
+    HWND owner = work->owner;
+    SecureZeroMemory(work, sizeof(*work));
+    free(work);
+
     if (!ok) {
+        SecureZeroMemory(response, sizeof(response));
         MessageBoxW(owner, L"Febius 계정 서버에 연결할 수 없습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
-        return;
+        return 0;
     }
     if (status == 401 || status == 403) {
         ClearToken();
         ShowApiError(owner, status, response);
-        return;
+        SecureZeroMemory(response, sizeof(response));
+        return 0;
     }
     if (status != 200) {
         ShowApiError(owner, status, response);
-        return;
+        SecureZeroMemory(response, sizeof(response));
+        return 0;
     }
 
     char username_utf8[128], plan_utf8[64];
@@ -645,7 +654,27 @@ void Account_ShowStatus(HWND owner) {
         !WideFromUtf8(plan_utf8, plan, sizeof(plan) / sizeof(plan[0]))) {
         StringCchCopyW(plan, 64, L"알 수 없음");
     }
+    SecureZeroMemory(response, sizeof(response));
     ShowAccountInfoWindow(owner, username, plan, L"사용 가능");
+    return 0;
+}
+
+void Account_ShowStatus(HWND owner) {
+    AccountStatusWork *work = (AccountStatusWork *)calloc(1, sizeof(*work));
+    if (!work || !LoadToken(work->token, sizeof(work->token))) {
+        free(work);
+        MessageBoxW(owner, L"현재 로그인된 Febius 계정이 없습니다.", L"Febius 계정", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    work->owner = owner;
+    uintptr_t thread = _beginthreadex(NULL, 0, AccountStatusWorker, work, 0, NULL);
+    if (thread) {
+        CloseHandle((HANDLE)thread);
+    } else {
+        SecureZeroMemory(work, sizeof(*work));
+        free(work);
+        MessageBoxW(owner, L"계정 정보를 확인하지 못했습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
+    }
 }
 
 typedef struct LogoutWork {
