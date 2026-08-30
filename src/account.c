@@ -23,13 +23,23 @@
 #define IDC_ACCOUNT_PASSWORD 5102
 #define IDC_ACCOUNT_LOGIN    5103
 #define IDC_ACCOUNT_CANCEL   5104
+#define WM_ACCOUNT_LOGIN_DONE (WM_APP + 70)
 
 typedef struct LoginWindowState {
     HWND owner;
     HWND username;
     HWND password;
+    HWND login_button;
+    HWND cancel_button;
     BOOL logged_in;
+    BOOL login_in_progress;
 } LoginWindowState;
+
+typedef struct LoginWork {
+    HWND window;
+    wchar_t username[ACCOUNT_USERNAME_MAX];
+    wchar_t password[1025];
+} LoginWork;
 
 static BOOL Utf8FromWide(const wchar_t *value, char *out, size_t out_size) {
     if (!value || !out || out_size < 2) return FALSE;
@@ -314,24 +324,43 @@ static BOOL PerformLogin(HWND owner, const wchar_t *username, const wchar_t *pas
     SecureZeroMemory(password_json, sizeof(password_json));
     SecureZeroMemory(body, sizeof(body));
     if (!request_ok) {
+        SecureZeroMemory(response, sizeof(response));
         MessageBoxW(owner, L"Febius 계정 서버에 연결할 수 없습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
         return FALSE;
     }
     if (status != 200) {
         ShowApiError(owner, status, response);
+        SecureZeroMemory(response, sizeof(response));
         return FALSE;
     }
 
     char token[ACCOUNT_TOKEN_MAX];
     if (!ExtractJsonString(response, "token", token, sizeof(token)) || !SaveToken(token)) {
         SecureZeroMemory(token, sizeof(token));
+        SecureZeroMemory(response, sizeof(response));
         MessageBoxW(owner, L"로그인 세션을 안전하게 저장하지 못했습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
         return FALSE;
     }
     SecureZeroMemory(token, sizeof(token));
+    SecureZeroMemory(response, sizeof(response));
     MessageBoxW(owner, L"Febius 계정에 로그인했습니다.\n라이선스가 확인되었습니다.",
                 L"Febius 계정", MB_OK | MB_ICONINFORMATION);
     return TRUE;
+}
+
+static unsigned __stdcall LoginWorker(void *param) {
+    LoginWork *work = (LoginWork *)param;
+    BOOL success = FALSE;
+    HWND window = NULL;
+    if (work) {
+        window = work->window;
+        success = PerformLogin(window, work->username, work->password);
+        SecureZeroMemory(work->password, sizeof(work->password));
+        SecureZeroMemory(work, sizeof(*work));
+        free(work);
+    }
+    if (window) PostMessageW(window, WM_ACCOUNT_LOGIN_DONE, success, 0);
+    return 0;
 }
 
 static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -356,43 +385,80 @@ static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             state->password = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
                           20, 136, 300, 26, hwnd, (HMENU)(INT_PTR)IDC_ACCOUNT_PASSWORD, NULL, NULL);
-            HWND login = CreateWindowW(L"BUTTON", L"로그인",
+            state->login_button = CreateWindowW(L"BUTTON", L"로그인",
                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                           156, 184, 78, 28, hwnd, (HMENU)(INT_PTR)IDC_ACCOUNT_LOGIN, NULL, NULL);
-            HWND cancel = CreateWindowW(L"BUTTON", L"취소",
+            state->cancel_button = CreateWindowW(L"BUTTON", L"취소",
                           WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                           242, 184, 78, 28, hwnd, (HMENU)(INT_PTR)IDC_ACCOUNT_CANCEL, NULL, NULL);
             SendMessageW(state->username, WM_SETFONT, (WPARAM)font, TRUE);
             SendMessageW(state->password, WM_SETFONT, (WPARAM)font, TRUE);
-            SendMessageW(login, WM_SETFONT, (WPARAM)font, TRUE);
-            SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(state->login_button, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(state->cancel_button, WM_SETFONT, (WPARAM)font, TRUE);
             SetFocus(state->username);
             return 0;
         }
         case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_ACCOUNT_LOGIN && state) {
-                wchar_t username[ACCOUNT_USERNAME_MAX];
-                wchar_t password[1025];
-                GetWindowTextW(state->username, username, ACCOUNT_USERNAME_MAX);
-                GetWindowTextW(state->password, password, 1025);
-                if (wcslen(username) < 3 || wcslen(password) < 8) {
-                    MessageBoxW(hwnd, L"아이디와 비밀번호를 확인해 주세요.", L"Febius 계정", MB_OK | MB_ICONWARNING);
-                } else if (PerformLogin(hwnd, username, password)) {
-                    state->logged_in = TRUE;
-                    SecureZeroMemory(password, sizeof(password));
-                    DestroyWindow(hwnd);
+            if (LOWORD(wParam) == IDC_ACCOUNT_LOGIN && state && !state->login_in_progress) {
+                LoginWork *work = (LoginWork *)calloc(1, sizeof(*work));
+                if (!work) {
+                    MessageBoxW(hwnd, L"로그인을 시작하지 못했습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
                     return 0;
                 }
-                SecureZeroMemory(password, sizeof(password));
+                work->window = hwnd;
+                GetWindowTextW(state->username, work->username, ACCOUNT_USERNAME_MAX);
+                GetWindowTextW(state->password, work->password, 1025);
+                if (wcslen(work->username) < 3 || wcslen(work->password) < 8) {
+                    SecureZeroMemory(work, sizeof(*work));
+                    free(work);
+                    MessageBoxW(hwnd, L"아이디와 비밀번호를 확인해 주세요.", L"Febius 계정", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
+                state->login_in_progress = TRUE;
+                EnableWindow(state->username, FALSE);
+                EnableWindow(state->password, FALSE);
+                EnableWindow(state->login_button, FALSE);
+                EnableWindow(state->cancel_button, FALSE);
+                SetWindowTextW(state->login_button, L"확인 중");
+                uintptr_t thread = _beginthreadex(NULL, 0, LoginWorker, work, 0, NULL);
+                if (thread) {
+                    CloseHandle((HANDLE)thread);
+                } else {
+                    state->login_in_progress = FALSE;
+                    EnableWindow(state->username, TRUE);
+                    EnableWindow(state->password, TRUE);
+                    EnableWindow(state->login_button, TRUE);
+                    EnableWindow(state->cancel_button, TRUE);
+                    SetWindowTextW(state->login_button, L"로그인");
+                    SecureZeroMemory(work, sizeof(*work));
+                    free(work);
+                    MessageBoxW(hwnd, L"로그인을 시작하지 못했습니다.", L"Febius 계정", MB_OK | MB_ICONERROR);
+                }
                 return 0;
             }
-            if (LOWORD(wParam) == IDC_ACCOUNT_CANCEL) {
+            if (LOWORD(wParam) == IDC_ACCOUNT_CANCEL && (!state || !state->login_in_progress)) {
                 DestroyWindow(hwnd);
                 return 0;
             }
             break;
+        case WM_ACCOUNT_LOGIN_DONE:
+            if (state) {
+                state->login_in_progress = FALSE;
+                if ((BOOL)wParam) {
+                    state->logged_in = TRUE;
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                EnableWindow(state->username, TRUE);
+                EnableWindow(state->password, TRUE);
+                EnableWindow(state->login_button, TRUE);
+                EnableWindow(state->cancel_button, TRUE);
+                SetWindowTextW(state->login_button, L"로그인");
+                SetFocus(state->password);
+            }
+            return 0;
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            if (!state || !state->login_in_progress) DestroyWindow(hwnd);
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
