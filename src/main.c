@@ -261,7 +261,7 @@ static volatile LONG g_opt_skip = 1;
 static volatile LONG g_opt_sanitize = 1;
 static volatile LONG g_opt_clean = 1;
 static volatile LONG g_opt_size = 1;
-static volatile LONG g_opt_fingerprint = 1;
+static volatile LONG g_opt_fingerprint = 0;
 static volatile LONG g_audio_bitrate = 320;
 static volatile LONG g_auto_update = 1;
 static BOOL g_download_batch_jobs[MAX_JOBS];
@@ -1877,9 +1877,6 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
         if (!SnapshotDownloadJob(index, &job)) return FALSE;
     }
 
-    if (!Filename_IsSafe(job.video_id)) {
-        return FailDownloadJob(index, L"영상 ID가 안전한 파일명 형식이 아닙니다.");
-    }
     if (!Filename_IsSafe(job.clean_name)) {
         return FailDownloadJob(index,
             L"안전하지 않거나 Windows에서 사용할 수 없는 파일명입니다. 파일명 자동 제거 옵션을 켜 주세요.");
@@ -1913,7 +1910,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
 
     wchar_t output_template[MAX_PATH * 2];
     if (FAILED(StringCchPrintfW(output_template, MAX_PATH * 2,
-                               L"%s\\%s.%d.%%(ext)s", temp_dir, job.video_id, index))) {
+                               L"%s\\job-%d.%%(ext)s", temp_dir, index))) {
         return FailDownloadJob(index, L"임시 다운로드 경로가 너무 깁니다.");
     }
 
@@ -1958,7 +1955,7 @@ static BOOL DownloadOne(int index, const wchar_t *folder, const wchar_t *temp_di
     }
 
     wchar_t temp_mp3[MAX_PATH];
-    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\%s.%d.mp3", temp_dir, job.video_id, index))) {
+    if (FAILED(StringCchPrintfW(temp_mp3, MAX_PATH, L"%s\\job-%d.mp3", temp_dir, index))) {
         return FailDownloadJob(index, L"변환 파일 경로가 너무 깁니다.");
     }
     if (!FileExistsW2(temp_mp3)) {
@@ -3280,9 +3277,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_HELP_CHECK_UPDATES: StartUpdateCheck(FALSE); break;
                 case IDM_HELP_RELEASES: OpenWebPage(hwnd, RELEASES_URL); break;
                 case IDM_HELP_ABOUT: ShowAboutDialog(hwnd); break;
-case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); RefreshAccountMenu(); break;
-case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); RefreshAccountMenu(); break;
-case IDM_ACCOUNT_SYNC:
+                case IDM_ACCOUNT_LOGIN: Account_ShowLogin(hwnd); RefreshAccountMenu(); break;
+                case IDM_ACCOUNT_STATUS: Account_ShowStatus(hwnd); RefreshAccountMenu(); break;
+                case IDM_ACCOUNT_SYNC:
     if (!Account_HasSavedSession()) {
         MessageBoxW(hwnd, L"Febius 계정에 먼저 로그인해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONINFORMATION);
     } else if (g_meta_running || g_download_running || g_tools_loading) {
@@ -3295,7 +3292,7 @@ case IDM_ACCOUNT_SYNC:
         MessageBoxW(hwnd, L"링크 가져오기를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.", L"저장된 링크 가져오기", MB_OK | MB_ICONWARNING);
     }
     break;
-case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); RefreshAccountMenu(); break;
+                case IDM_ACCOUNT_LOGOUT: Account_Logout(hwnd); RefreshAccountMenu(); break;
                 case IDM_FILE_EXIT: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case IDM_OPT_FINGERPRINT: ToggleBooleanOption(id); break;
                 case IDM_OPT_DEDUP:
